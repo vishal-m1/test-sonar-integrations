@@ -1,0 +1,102 @@
+name: SonarQube PR Quality Gate Check
+
+on:
+  pull_request:
+    branches:
+      - main
+      - master
+      - develop
+
+jobs:
+  sonarqube:
+    name: SonarQube Analysis
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Shallow clones should be disabled for better analysis
+      
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      
+      - name: Cache SonarQube packages
+        uses: actions/cache@v3
+        with:
+          path: ~/.sonar/cache
+          key: ${{ runner.os }}-sonar
+          restore-keys: ${{ runner.os }}-sonar
+      
+      - name: Run SonarQube Scanner
+        uses: sonarsource/sonarqube-scan-action@master
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        continue-on-error: true
+        id: sonarqube_scan
+      
+      - name: Check Quality Gate Status
+        id: quality_gate
+        uses: sonarsource/sonarqube-quality-gate-action@master
+        timeout-minutes: 5
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        continue-on-error: true
+      
+      - name: Send Slack Notification on Failure
+        if: failure() || steps.quality_gate.outcome == 'failure'
+        uses: slackapi/slack-github-action@v1
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          payload: |
+            {
+              "channel": "#testing-sonarqube",
+              "username": "SonarQube Bot",
+              "icon_emoji": ":warning:",
+              "attachments": [{
+                "color": "danger",
+                "title": "❌ SonarQube Quality Gate Failed",
+                "text": "The SonarQube quality gate check failed for this pull request.",
+                "fields": [
+                  {
+                    "title": "Repository",
+                    "value": "${{ github.repository }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Pull Request",
+                    "value": "<${{ github.event.pull_request.html_url }}|PR #${{ github.event.pull_request.number }}>",
+                    "short": true
+                  },
+                  {
+                    "title": "Branch",
+                    "value": "${{ github.head_ref }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Author",
+                    "value": "${{ github.event.pull_request.user.login }}",
+                    "short": true
+                  },
+                  {
+                    "title": "Commit",
+                    "value": "<${{ github.event.pull_request.head.repo.html_url }}/commit/${{ github.sha }}|${{ github.sha }}>",
+                    "short": false
+                  }
+                ],
+                "footer": "GitHub Actions",
+                "ts": ${{ github.event.pull_request.updated_at && github.event.pull_request.updated_at || github.run_id }}
+              }]
+            }
+      
+      - name: Fail job if quality gate failed
+        if: steps.quality_gate.outcome == 'failure'
+        run: |
+          echo "❌ SonarQube Quality Gate failed!"
+          exit 1
+
