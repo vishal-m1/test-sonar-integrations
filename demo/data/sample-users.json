@@ -1,0 +1,33 @@
+{
+  "users": [
+    {
+      "id": 1,
+      "name": "Alice Johnson",
+      "email": "alice@devsavant.com",
+      "role": "admin",
+      "active": true,
+      "createdAt": "2026-01-15"
+    },
+    {
+      "id": 2,
+      "name": "Bob Smith",
+      "email": "bob@devsavant.com",
+      "role": "developer",
+      "active": true,
+      "createdAt": "2026-02-20"
+    },
+    {
+      "id": 3,
+      "name": "Carol White",
+      "email": "carol@devsavant.com",
+      "role": "viewer",
+      "active": false,
+      "createdAt": "2026-03-10"
+    }
+  ],
+  "meta": {
+    "total": 3,
+    "generatedBy": "Claude demo PR",
+    "generatedAt": "2026-05-21"
+  }
+}
