@@ -1,0 +1,70 @@
+{
+  "id": "UeIlfzr5WftycXbY",
+  "name": "Notifications - Slack Event Reply - Demo",
+  "active": false,
+  "isArchived": false,
+  "versionId": "d3d0e31c-5678-4f8e-aa56-5aabced638b1",
+  "description": "Demo workflow: triggers on a Slack app_mention event and automatically posts a reply message back to the same channel.",
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true
+  },
+  "connections": {
+    "Slack Event Trigger": {
+      "main": [
+        [
+          {
+            "node": "Send Slack Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "nodes": [
+    {
+      "id": "cc8c824b-6574-4f7f-a491-aa6a929964e8",
+      "name": "Slack Event Trigger",
+      "type": "n8n-nodes-base.slackTrigger",
+      "typeVersion": 1,
+      "position": [0, 0],
+      "parameters": {
+        "trigger": ["app_mention"],
+        "watchWorkspace": true
+      },
+      "webhookId": "b7d61658-9e5d-4d0c-93bc-daa891abba99"
+    },
+    {
+      "id": "f4994a9e-38df-4ef7-bf05-72c91cd258df",
+      "name": "Send Slack Reply",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [224, 0],
+      "parameters": {
+        "resource": "message",
+        "operation": "post",
+        "authentication": "accessToken",
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $json.channel }}"
+        },
+        "messageType": "text",
+        "text": "={{ \"\uD83D\uDC4B Hello! I received your message: *\" + $json.text + \"*. This is an automated reply from the demo workflow.\" }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": false,
+          "mrkdwn": true
+        }
+      }
+    }
+  ],
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "tags": [],
+  "createdAt": "2026-05-21T14:55:34.551Z",
+  "updatedAt": "2026-05-21T14:55:34.551Z"
+}
