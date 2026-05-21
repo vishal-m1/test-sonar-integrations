@@ -9,7 +9,52 @@
 | Edge cases | ✅ Pass |
 
 ---
+```mermaid
+flowchart TD
 
+    A[Claude Teams Shared Project]
+    B[Shared GitHub Repository]
+
+    subgraph DEV["Development Environment"]
+        C1[Shared Dev n8n Instance]
+        D1[Vishal Workflows]
+        D2[Rahul Workflows]
+        D3[Amit Workflows]
+    end
+
+    subgraph REVIEW["Approval Process"]
+        E[Pull Request Review]
+        F[Admin Approval]
+    end
+
+    subgraph PROD["Production Environment"]
+        G[Prod n8n Instance]
+        H[Live Business Automations]
+    end
+
+    subgraph SECRETS["Secrets Management"]
+        I[AWS Secrets Manager / Vault]
+    end
+
+    A --> B
+    B --> C1
+
+    C1 --> D1
+    C1 --> D2
+    C1 --> D3
+
+    D1 --> E
+    D2 --> E
+    D3 --> E
+
+    E --> F
+    F --> G
+
+    I --> C1
+    I --> G
+
+    G --> H
+```
 ## Happy Path Test
 
 **Input used (pin data):**
