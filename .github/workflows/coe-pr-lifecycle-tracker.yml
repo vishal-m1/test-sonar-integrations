@@ -1,0 +1,445 @@
+# =============================================================================
+# COE Asset Registry — PR Lifecycle Tracker
+# =============================================================================
+#
+# Tracks the three PR lifecycle events into coe_asset_registry on Supabase:
+#
+#   1. PR opened / reopened
+#      └─ UPSERT row → pipeline_status = 'submitted'
+#         Writes: github_branch, github_pr_url, github_pr_number,
+#                 pr_raised_by, submitted_at
+#
+#   2. PR review submitted (approved or changes_requested)
+#      └─ UPDATE row → pipeline_status = 'under_review' | 'rework_requested'
+#         Writes: reviewed_by, review_notes, gates_passed_at (on approval)
+#
+#   3. PR merged
+#      └─ UPDATE row → pipeline_status = 'approved', operational_status = 'active'
+#         Writes: pr_merged, approved_at, workflow_json, context_doc,
+#                 testing_report_doc, mermaid_source, n8n_activated, activated_at
+#
+# Lookup strategy:
+#   - Job 1 (PR open): UPSERT by asset_name (unique) parsed from PR title
+#   - Jobs 2 & 3:      UPDATE by github_pr_number (indexed, set in Job 1)
+#
+# Required GitHub secret:
+#   PG_CONNECTION_STRING — full Postgres connection URL
+#   (set in repo Settings → Secrets → Actions → New repository secret)
+#
+# =============================================================================
+
+name: COE Asset Registry — PR Lifecycle Tracker
+
+on:
+  pull_request:
+    types: [opened, reopened, closed]
+    branches: [main]
+    paths:
+      - 'workflows/**'
+  pull_request_review:
+    types: [submitted]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 1 — PR opened / reopened  →  pipeline_status = 'submitted'
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  on-pr-opened:
+    name: "Registry: mark submitted"
+    if: >-
+      github.event_name == 'pull_request' &&
+      (github.event.action == 'opened' || github.event.action == 'reopened')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install pg client library
+        run: npm install pg
+
+      - name: Upsert registry row → submitted
+        env:
+          PG_CONNECTION_STRING: ${{ secrets.PG_CONNECTION_STRING }}
+          PR_TITLE:      ${{ github.event.pull_request.title }}
+          PR_BRANCH:     ${{ github.event.pull_request.head.ref }}
+          PR_URL:        ${{ github.event.pull_request.html_url }}
+          PR_NUMBER:     ${{ github.event.pull_request.number }}
+          PR_AUTHOR:     ${{ github.event.pull_request.user.login }}
+          PR_CREATED_AT: ${{ github.event.pull_request.created_at }}
+          # PR_BODY is used to extract n8n Workflow ID and submitter name/email.
+          # Passed via env to avoid shell injection from user-controlled content.
+          PR_BODY:       ${{ github.event.pull_request.body }}
+
+        run: |
+          node << 'SCRIPT'
+          (async () => {
+            const { Client } = require('pg');
+
+            const prTitle  = process.env.PR_TITLE  || '';
+            const prBody   = process.env.PR_BODY   || '';
+            const prAuthor = process.env.PR_AUTHOR || 'unknown';
+
+            // ── Asset name ────────────────────────────────────────────────
+            // PR title format: "Publish: <Asset Name>"
+            const assetName = prTitle.startsWith('Publish: ')
+              ? prTitle.slice(9).trim()
+              : prTitle.trim();
+
+            // ── n8n Workflow ID ───────────────────────────────────────────
+            // PR body contains: **n8n Workflow ID:** cXBOQCYvOSK0b77n
+            const wfIdMatch     = prBody.match(/\*\*n8n Workflow ID:\*\*\s*(\S+)/);
+            const n8nWorkflowId = wfIdMatch ? wfIdMatch[1] : null;
+
+            // ── Submitter name + email ────────────────────────────────────
+            // PR body contains: **Submitted by:** Vishal Mishra (vishalm@devsavant.com)
+            const submitterMatch = prBody.match(
+              /\*\*Submitted by:\*\*\s*([^(\n]+?)(?:\s*\(([^)]+)\))?(?:\n|$)/
+            );
+            const ownerName  = submitterMatch ? submitterMatch[1].trim() : prAuthor;
+            const ownerEmail = (submitterMatch && submitterMatch[2])
+              ? submitterMatch[2].trim()
+              : `${prAuthor}@devsavant.com`;
+
+            // ── Description (max 250 chars per ck_description_length) ─────
+            const description = `PR #${process.env.PR_NUMBER} — ${assetName}`.slice(0, 250);
+
+            const client = new Client({ connectionString: process.env.PG_CONNECTION_STRING });
+            await client.connect();
+
+            // UPSERT:
+            //   If asset was pre-registered by Claude → UPDATE the pipeline fields only.
+            //   If no prior row exists (PR raised without prior MCP registration) → INSERT
+            //   a minimal draft row so all subsequent jobs have something to UPDATE.
+            //
+            // Columns NOT touched on conflict: asset_type, tool_used, description,
+            // owner_name, owner_email, business_unit, n8n_workflow_id — these were
+            // set by Claude's MCP registration and should not be overwritten here.
+            const result = await client.query(
+              `
+              INSERT INTO coe_asset_registry (
+                asset_name,
+                asset_type,
+                tool_used,
+                description,
+                owner_name,
+                owner_email,
+                business_unit,
+                systems_touched,
+                credential_refs,
+                access_type,
+                pipeline_status,
+                github_branch,
+                github_pr_url,
+                github_pr_number,
+                pr_raised_by,
+                submitted_at,
+                n8n_workflow_id
+              ) VALUES (
+                $1,                -- asset_name
+                'n8n_workflow',    -- asset_type  (workflows/ path implies n8n)
+                'claude',          -- tool_used
+                $2,                -- description  (≤250 chars)
+                $3,                -- owner_name
+                $4,                -- owner_email
+                'devsavant',       -- business_unit
+                '{}',              -- systems_touched  (empty array is valid; populated by Claude)
+                '[]',              -- credential_refs  (empty JSON array)
+                'read-only',       -- access_type      (conservative default)
+                'submitted',       -- pipeline_status
+                $5,                -- github_branch
+                $6,                -- github_pr_url
+                $7,                -- github_pr_number
+                $8,                -- pr_raised_by
+                $9::timestamptz,   -- submitted_at
+                $10                -- n8n_workflow_id
+              )
+              ON CONFLICT (asset_name) DO UPDATE SET
+                pipeline_status  = 'submitted',
+                github_branch    = EXCLUDED.github_branch,
+                github_pr_url    = EXCLUDED.github_pr_url,
+                github_pr_number = EXCLUDED.github_pr_number,
+                pr_raised_by     = EXCLUDED.pr_raised_by,
+                submitted_at     = EXCLUDED.submitted_at
+              RETURNING asset_name, id, (xmax = 0) AS was_inserted
+              `,
+              [
+                assetName,                                  // $1
+                description,                                // $2
+                ownerName,                                  // $3
+                ownerEmail,                                 // $4
+                process.env.PR_BRANCH,                     // $5
+                process.env.PR_URL,                        // $6
+                parseInt(process.env.PR_NUMBER, 10),       // $7
+                prAuthor,                                   // $8
+                process.env.PR_CREATED_AT,                 // $9
+                n8nWorkflowId,                             // $10
+              ]
+            );
+
+            await client.end();
+
+            const row        = result.rows[0];
+            const wasInsert  = row.was_inserted;
+            console.log(`✅ [PR #${process.env.PR_NUMBER}] "${row.asset_name}" → submitted`);
+            console.log(`   Row ${wasInsert ? 'INSERTED (new)' : 'UPDATED (pre-existing)'}`);
+            console.log(`   ID: ${row.id}`);
+            console.log(`   Raised by: ${prAuthor} | Owner: ${ownerName} <${ownerEmail}>`);
+            console.log(`   n8n Workflow ID: ${n8nWorkflowId || '(not found in PR body)'}`);
+          })().catch(err => {
+            console.error('❌ Registry update failed:', err.message);
+            process.exit(1);
+          });
+          SCRIPT
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 2 — Review submitted  →  under_review  OR  rework_requested
+# ─────────────────────────────────────────────────────────────────────────────
+  on-pr-reviewed:
+    name: "Registry: record review"
+    if: github.event_name == 'pull_request_review'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Install pg client library
+        run: npm install pg
+
+      - name: Update registry row → under_review / rework_requested
+        env:
+          PG_CONNECTION_STRING: ${{ secrets.PG_CONNECTION_STRING }}
+          PR_NUMBER:    ${{ github.event.pull_request.number }}
+          REVIEWER:     ${{ github.event.review.user.login }}
+          REVIEW_STATE: ${{ github.event.review.state }}
+          # review.body can be null when reviewer submits without a comment
+          REVIEW_BODY:  ${{ github.event.review.body }}
+          REVIEWED_AT:  ${{ github.event.review.submitted_at }}
+
+        run: |
+          node << 'SCRIPT'
+          (async () => {
+            const { Client } = require('pg');
+
+            const reviewState = process.env.REVIEW_STATE || '';
+            const prNumber    = parseInt(process.env.PR_NUMBER, 10);
+
+            // Only act on reviews that carry a decision.
+            // 'commented' reviews don't change pipeline state.
+            if (!['approved', 'changes_requested'].includes(reviewState)) {
+              console.log(`ℹ️  Review state "${reviewState}" — no registry update needed.`);
+              process.exit(0);
+            }
+
+            // Schema transitions:
+            //   approved          → under_review   (all gates passed, awaiting merge)
+            //   changes_requested → rework_requested
+            const newStatus = reviewState === 'approved'
+              ? 'under_review'
+              : 'rework_requested';
+
+            const client = new Client({ connectionString: process.env.PG_CONNECTION_STRING });
+            await client.connect();
+
+            const result = await client.query(
+              `
+              UPDATE coe_asset_registry SET
+                pipeline_status = $1,
+                reviewed_by     = $2,
+                review_notes    = $3,
+                -- gates_passed_at marks when the asset entered under_review.
+                -- Only set (and only once) when transitioning to under_review.
+                gates_passed_at = CASE
+                  WHEN $1 = 'under_review' AND gates_passed_at IS NULL
+                  THEN $4::timestamptz
+                  ELSE gates_passed_at
+                END
+              WHERE github_pr_number = $5
+              RETURNING asset_name, id
+              `,
+              [
+                newStatus,                                 // $1
+                process.env.REVIEWER,                     // $2
+                process.env.REVIEW_BODY || null,          // $3  (null if blank)
+                process.env.REVIEWED_AT,                  // $4
+                prNumber,                                  // $5
+              ]
+            );
+
+            await client.end();
+
+            if (result.rowCount === 0) {
+              // The PR opened before this action was deployed, or was for a
+              // non-workflow path. Not a hard failure — just log and skip.
+              console.warn(
+                `⚠️  No registry row found for PR #${prNumber}.\n` +
+                `   Was this PR opened before the action was deployed?`
+              );
+            } else {
+              const { asset_name, id } = result.rows[0];
+              console.log(`✅ [PR #${prNumber}] "${asset_name}" → ${newStatus}`);
+              console.log(`   Reviewed by: ${process.env.REVIEWER}`);
+              console.log(`   ID: ${id}`);
+              if (process.env.REVIEW_BODY) {
+                console.log(`   Notes: ${process.env.REVIEW_BODY.slice(0, 120)}...`);
+              }
+            }
+          })().catch(err => {
+            console.error('❌ Registry update failed:', err.message);
+            process.exit(1);
+          });
+          SCRIPT
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# JOB 3 — PR merged  →  approved + docs ingested + n8n marked active
+# ─────────────────────────────────────────────────────────────────────────────
+  on-pr-merged:
+    name: "Registry: mark approved + ingest docs"
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.action == 'closed' &&
+      github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      # Check out the merge commit so we can read the committed files.
+      - name: Checkout merged commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Install pg client library
+        run: npm install pg
+
+      - name: Read committed files + update registry → approved
+        env:
+          PG_CONNECTION_STRING: ${{ secrets.PG_CONNECTION_STRING }}
+          PR_TITLE:     ${{ github.event.pull_request.title }}
+          PR_NUMBER:    ${{ github.event.pull_request.number }}
+          PR_MERGED_AT: ${{ github.event.pull_request.merged_at }}
+          MERGED_BY:    ${{ github.event.pull_request.merged_by.login }}
+
+        run: |
+          node << 'SCRIPT'
+          (async () => {
+            const { Client } = require('pg');
+            const fs   = require('fs');
+            const path = require('path');
+
+            const prTitle  = process.env.PR_TITLE || '';
+            const prNumber = parseInt(process.env.PR_NUMBER, 10);
+            const mergedAt = process.env.PR_MERGED_AT;
+            const mergedBy = process.env.MERGED_BY || 'unknown';
+
+            // ── Derive file paths from asset name ─────────────────────────
+            // PR title: "Publish: Sample - Fetch Daily Joke - Format Output"
+            // → asset_name: "Sample - Fetch Daily Joke - Format Output"
+            // → kebab:      "sample-fetch-daily-joke-format-output"
+            // → files:
+            //     workflows/sample-fetch-daily-joke-format-output.json
+            //     workflows/sample-fetch-daily-joke-format-output/context.md
+            //     workflows/sample-fetch-daily-joke-format-output/testing-report.md
+            const assetName = prTitle.startsWith('Publish: ')
+              ? prTitle.slice(9).trim()
+              : prTitle.trim();
+
+            const kebab = assetName
+              .toLowerCase()
+              .replace(/[^a-z0-9]+/g, '-')
+              .replace(/^-|-$/g, '');
+
+            const jsonPath    = path.join('workflows', `${kebab}.json`);
+            const contextPath = path.join('workflows', kebab, 'context.md');
+            const reportPath  = path.join('workflows', kebab, 'testing-report.md');
+
+            // ── Read committed files ──────────────────────────────────────
+            const workflowJson = fs.existsSync(jsonPath)
+              ? JSON.parse(fs.readFileSync(jsonPath, 'utf8'))
+              : null;
+
+            const contextDoc = fs.existsSync(contextPath)
+              ? fs.readFileSync(contextPath, 'utf8')
+              : null;
+
+            const testingReport = fs.existsSync(reportPath)
+              ? fs.readFileSync(reportPath, 'utf8')
+              : null;
+
+            // ── Extract Mermaid source from context.md ────────────────────
+            // Looks for the ```mermaid ... ``` block inside context.md.
+            let mermaidSource = null;
+            if (contextDoc) {
+              const m = contextDoc.match(/```mermaid\r?\n([\s\S]*?)```/);
+              if (m) mermaidSource = m[1].trim();
+            }
+
+            console.log(`📁 Asset:   "${assetName}"  (kebab: ${kebab})`);
+            console.log(`📂 Files:   json=${!!workflowJson}  context=${!!contextDoc}  report=${!!testingReport}`);
+            if (mermaidSource) {
+              console.log(`📊 Mermaid: extracted (${mermaidSource.length} chars)`);
+            }
+
+            const client = new Client({ connectionString: process.env.PG_CONNECTION_STRING });
+            await client.connect();
+
+            // ── Update the registry row ───────────────────────────────────
+            //
+            // Columns written here (per schema write-ownership comments):
+            //   pipeline_status     → 'approved'
+            //   operational_status  → 'active'    (only valid when approved — per ck_operational_status_requires_approved)
+            //   pr_merged           → TRUE
+            //   approved_at         → merged_at timestamp
+            //   n8n_activated       → TRUE         (marks n8n as live per PRD BR-06)
+            //   activated_at        → merged_at timestamp
+            //   workflow_json       → parsed JSON from workflows/<kebab>.json
+            //   context_doc         → text content of context.md
+            //   testing_report_doc  → text content of testing-report.md
+            //   mermaid_source      → extracted from context.md ```mermaid block
+            //
+            // Note: reviewed_by was already written in Job 2 (review event).
+            // We only set it here as a fallback if Job 2 never ran (e.g. action
+            // was deployed after the review was submitted).
+            const result = await client.query(
+              `
+              UPDATE coe_asset_registry SET
+                pipeline_status    = 'approved',
+                operational_status = 'active',
+                pr_merged          = TRUE,
+                approved_at        = $1::timestamptz,
+                n8n_activated      = TRUE,
+                activated_at       = $1::timestamptz,
+                workflow_json      = $2::jsonb,
+                context_doc        = $3,
+                testing_report_doc = $4,
+                mermaid_source     = $5
+              WHERE github_pr_number = $6
+              RETURNING asset_name, id, n8n_workflow_id, reviewed_by
+              `,
+              [
+                mergedAt,                                              // $1
+                workflowJson ? JSON.stringify(workflowJson) : null,   // $2
+                contextDoc,                                            // $3
+                testingReport,                                         // $4
+                mermaidSource,                                         // $5
+                prNumber,                                              // $6
+              ]
+            );
+
+            await client.end();
+
+            if (result.rowCount === 0) {
+              console.error(
+                `❌ No registry row found for PR #${prNumber}.\n` +
+                `   The PR may have been opened before this action was deployed.`
+              );
+              process.exit(1);
+            }
+
+            const { asset_name, id, n8n_workflow_id, reviewed_by } = result.rows[0];
+            console.log(`✅ [PR #${prNumber}] "${asset_name}" → approved + active`);
+            console.log(`   Registry ID:    ${id}`);
+            console.log(`   n8n Workflow:   ${n8n_workflow_id || '(not set)'}`);
+            console.log(`   Reviewed by:    ${reviewed_by || '(not recorded — Job 2 may have been skipped)'}`);
+            console.log(`   Merged by:      ${mergedBy}`);
+            console.log(`   Approved at:    ${mergedAt}`);
+          })().catch(err => {
+            console.error('❌ Registry update failed:', err.message);
+            process.exit(1);
+          });
+          SCRIPT
