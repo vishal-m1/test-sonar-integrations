@@ -66,6 +66,13 @@
 #   - gates_passed_at uses reviewer approval as proxy (see Job 2 note above).
 #   - No check_suite / CI gate event trigger — add in V2 when CI gates are live.
 #
+# ── Fix log ───────────────────────────────────────────────────────────────────
+#   v2.0.1 — Fixed "inconsistent types deduced for parameter $1" in Job 2 and
+#            Job 3 by adding explicit ::text casts on all parameterized ENUM
+#            column assignments. PostgreSQL cannot infer the type of $N params
+#            against ENUM columns without an explicit cast.
+#            Changed lines: Job 2 pipeline_status=$1 → $1::text (×2),
+#                           Job 3 operational_status=$1 → $1::text
 # =============================================================================
 
 name: COE Asset Registry — PR Lifecycle Tracker
@@ -311,10 +318,14 @@ jobs:
             const client = new Client({ connectionString: process.env.PG_CONNECTION_STRING });
             await client.connect();
 
+            // FIX v2.0.1: Added ::text cast on $1 to avoid "inconsistent types
+            // deduced for parameter $1" error when pipeline_status is an ENUM
+            // or CHECK-constrained TEXT column. PostgreSQL cannot infer the type
+            // of a parameterized value against ENUM columns without an explicit cast.
             const result = await client.query(
               `
               UPDATE coe_asset_registry SET
-                pipeline_status = $1,
+                pipeline_status = $1::text,
                 reviewed_by     = $2,
                 review_notes    = $3,
                 -- gates_passed_at: marks when the asset entered under_review.
@@ -323,7 +334,7 @@ jobs:
                 -- subsequent reviews of the same PR (CASE preserves existing value).
                 -- In V2 this moves to a check_suite completed event trigger.
                 gates_passed_at = CASE
-                  WHEN $1 = 'under_review' AND gates_passed_at IS NULL
+                  WHEN $1::text = 'under_review' AND gates_passed_at IS NULL
                   THEN $4::timestamptz
                   ELSE gates_passed_at
                 END
@@ -561,11 +572,13 @@ jobs:
             const n8nActivated      = activationSuccess ? true      : false;
             const activatedAt       = activationSuccess ? mergedAt  : null;
 
+            // FIX v2.0.1: Added ::text cast on $1 (operational_status) to avoid
+            // "inconsistent types deduced for parameter $1" against ENUM columns.
             const updateResult = await pgClient.query(
               `
               UPDATE coe_asset_registry SET
                 pipeline_status    = 'approved',
-                operational_status = $1,
+                operational_status = $1::text,
                 pr_merged          = TRUE,
                 approved_at        = $2::timestamptz,
                 n8n_activated      = $3,
