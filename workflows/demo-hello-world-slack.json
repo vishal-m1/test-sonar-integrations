@@ -1,0 +1,70 @@
+{
+  "name": "Demo - Hello World - Slack",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "manual-trigger-1",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "msg-1",
+              "name": "message",
+              "value": "👋 Hello from DevSavant COE! This is a demo workflow running on n8n. 🚀",
+              "type": "string"
+            },
+            {
+              "id": "msg-2",
+              "name": "timestamp",
+              "value": "={{ new Date().toISOString() }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "compose-message-1",
+      "name": "Compose Message",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [540, 300]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "post",
+        "select": "channel",
+        "channelId": { "__rl": true, "mode": "name", "value": "general" },
+        "messageType": "text",
+        "text": "={{ $json.message }} \n\n_Sent at: {{ $json.timestamp }}_",
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
+      },
+      "id": "send-slack-1",
+      "name": "Send Slack Message",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [840, 300]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [[{ "node": "Compose Message", "type": "main", "index": 0 }]]
+    },
+    "Compose Message": {
+      "main": [[{ "node": "Send Slack Message", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "meta": {
+    "n8nWorkflowId": "pCZFyXzgRNNzN41n",
+    "registryId": "0506325a-9235-41f6-b567-7003b0b5b14e"
+  }
+}
