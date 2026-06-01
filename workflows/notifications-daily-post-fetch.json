@@ -1,0 +1,62 @@
+{
+  "id": "PwakGcfVd89gry3F",
+  "name": "Notifications - Daily Post Fetch - JSONPlaceholder",
+  "active": false,
+  "nodes": [
+    {
+      "id": "3f7ab8d9-2741-49e6-a059-917140e1d015",
+      "name": "Daily Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [0, 0],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 9,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "a5d7cefb-e936-4d6f-8cfa-eabdd34484bd",
+      "name": "Fetch Post",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [224, 0],
+      "parameters": {
+        "method": "GET",
+        "url": "https://jsonplaceholder.typicode.com/posts/1"
+      }
+    },
+    {
+      "id": "f65b6ccb-8d41-45ce-92a5-a90d41ad61be",
+      "name": "Format Result",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [448, 0],
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": false,
+        "assignments": {
+          "assignments": [
+            {"id": "field-post-id",    "name": "postId",     "value": "={{ $json.id }}",          "type": "number"},
+            {"id": "field-title",      "name": "title",      "value": "={{ $json.title }}",        "type": "string"},
+            {"id": "field-body",       "name": "body",       "value": "={{ $json.body }}",         "type": "string"},
+            {"id": "field-fetched-at", "name": "fetchedAt",  "value": "={{ $now.toISO() }}",       "type": "string"}
+          ]
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily Schedule": { "main": [[{"node": "Fetch Post",      "type": "main", "index": 0}]] },
+    "Fetch Post":     { "main": [[{"node": "Format Result",   "type": "main", "index": 0}]] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "meta": { "aiBuilderAssisted": true }
+}
