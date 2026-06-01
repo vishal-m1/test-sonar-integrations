@@ -1,0 +1,63 @@
+{
+  "id": "xcU89kB6ADdTNSYM",
+  "name": "Data - Log Webhook - Google Sheets",
+  "active": false,
+  "versionId": "954d98fa-8081-4303-b1fd-7b7e99b4a7f5",
+  "createdAt": "2026-06-01T14:49:29.446Z",
+  "updatedAt": "2026-06-01T14:49:29.446Z",
+  "settings": { "executionOrder": "v1" },
+  "connections": {
+    "Webhook Trigger": { "main": [[{ "node": "Log to Google Sheets", "type": "main", "index": 0 }]] },
+    "Log to Google Sheets": { "main": [[{ "node": "Respond to Webhook", "type": "main", "index": 0 }]] }
+  },
+  "nodes": [
+    {
+      "id": "85b2a84b-c0fb-4cf1-a5a3-991eef502ac1",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [0, 0],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "log-to-sheets",
+        "responseMode": "responseNode"
+      },
+      "webhookId": "ff28f575-3a21-47d7-bea3-6f437dfa90f1"
+    },
+    {
+      "id": "664bcc1e-c10f-4025-82b3-129899788c2d",
+      "name": "Log to Google Sheets",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [224, 0],
+      "parameters": {
+        "resource": "sheet",
+        "operation": "append",
+        "documentId": { "__rl": true, "mode": "list", "value": "" },
+        "sheetName": { "__rl": true, "mode": "list", "value": "" },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "schema": [
+            { "id": "timestamp", "displayName": "timestamp", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false },
+            { "id": "source", "displayName": "source", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false },
+            { "id": "payload", "displayName": "payload", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": false }
+          ]
+        },
+        "options": { "cellFormat": "USER_ENTERED" }
+      }
+    },
+    {
+      "id": "91066470-83ba-4839-ae67-c4950868f124",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [448, 0],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": { "status": "ok", "message": "Payload logged to Google Sheets" },
+        "options": { "responseCode": 200 }
+      }
+    }
+  ]
+}
