@@ -1,0 +1,62 @@
+{
+  "id": "cVpYw0iPd2fb9cjH",
+  "name": "Payments - Create Jira Ticket - On Stripe Failure",
+  "active": false,
+  "isArchived": false,
+  "versionId": "3d8cd0fc-1db5-4c13-887f-a915fed48a2c",
+  "settings": { "executionOrder": "v1", "availableInMCP": true },
+  "connections": {
+    "Stripe Payment Failure": { "main": [[{ "node": "Format Issue Data", "type": "main", "index": 0 }]] },
+    "Format Issue Data": { "main": [[{ "node": "Create Jira Issue", "type": "main", "index": 0 }]] }
+  },
+  "nodes": [
+    {
+      "id": "1955ff4c-d245-4e5c-9126-62e88be9d95e",
+      "name": "Stripe Payment Failure",
+      "type": "n8n-nodes-base.stripeTrigger",
+      "typeVersion": 1,
+      "position": [0, 0],
+      "parameters": { "events": ["payment_intent.payment_failed", "charge.failed", "invoice.payment_failed"] },
+      "webhookId": "91b35809-3bc2-40b9-9098-b92e28ec852b"
+    },
+    {
+      "id": "0b48fa13-c734-4e41-ab0e-f66c33e24ea2",
+      "name": "Format Issue Data",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [224, 0],
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": false,
+        "assignments": {
+          "assignments": [
+            { "id": "summary", "name": "summary", "value": "={{ \"Payment Failure: \" + $json.type + \" \u2014 \" + ($json.data?.object?.id ?? \"unknown\") }}", "type": "string" },
+            { "id": "description", "name": "description", "value": "={{ \"**Event:** \" + $json.type + \"\\n\\n**Object ID:** \" + ($json.data?.object?.id ?? \"N/A\") + \"\\n\\n**Amount:** \" + (($json.data?.object?.amount ?? $json.data?.object?.amount_due ?? 0) / 100) + \" \" + ($json.data?.object?.currency ?? \"usd\").toUpperCase() + \"\\n\\n**Customer:** \" + ($json.data?.object?.customer ?? \"N/A\") + \"\\n\\n**Failure Reason:** \" + ($json.data?.object?.last_payment_error?.message ?? $json.data?.object?.failure_message ?? \"N/A\") + \"\\n\\n**Stripe Event ID:** \" + $json.id }}", "type": "string" },
+            { "id": "stripeEventId", "name": "stripeEventId", "value": "={{ $json.id }}", "type": "string" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "f3648efa-875a-4a78-b5ec-23c1fd4d40ee",
+      "name": "Create Jira Issue",
+      "type": "n8n-nodes-base.jira",
+      "typeVersion": 1,
+      "position": [448, 0],
+      "parameters": {
+        "resource": "issue",
+        "operation": "create",
+        "jiraVersion": "cloud",
+        "project": { "__rl": true, "mode": "id", "value": "PAYMENTS" },
+        "issueType": { "__rl": true, "mode": "id", "value": "Bug" },
+        "summary": "={{ $json.summary }}",
+        "additionalFields": {
+          "description": "={{ $json.description }}",
+          "labels": ["stripe", "payment-failure", "automated"]
+        }
+      }
+    }
+  ],
+  "meta": { "aiBuilderAssisted": true, "builderVariant": "mcp" },
+  "description": "Listens for Stripe payment failures (charge.failed, payment_intent.payment_failed, invoice.payment_failed) and automatically creates a Jira Bug ticket with failure details."
+}
