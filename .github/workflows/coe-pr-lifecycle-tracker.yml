@@ -1,11 +1,12 @@
 # =============================================================================
 # COE Asset Registry — PR Lifecycle Tracker
-# Version: 2.1
+# Version: 2.2
 # Aligned: PRD v1.6 (BR-06), TRD v1.2 (TR-09), schema v5
 # =============================================================================
 #
 # Tracks PR lifecycle events into coe_asset_registry on Supabase / GCP Cloud SQL.
-# This Action owns pipeline_status, all PR/review fields, and approved content.
+# This Action owns pipeline_status, all PR/review fields, approved content,
+# and KPI fields reconciled from kpi-snapshot.json on merge.
 # Claude's MCP wrapper owns draft-phase fields. The two never overlap.
 #
 # ── Event → Job mapping ────────────────────────────────────────────────────────
@@ -32,6 +33,12 @@
 #         Writes: pr_merged, approved_at, reviewed_by (fallback),
 #                 workflow_json, context_doc, testing_report_doc, mermaid_source
 #
+#         KPI RECONCILIATION (v2.2):
+#         Reads kpi-snapshot.json from the merged commit.
+#         Updates manual_time_minutes_per_run and estimated_runs_per_week
+#         using COALESCE — reviewer-edited values win; DB value is preserved
+#         if the file is missing or unparseable.
+#
 #         Then: calls n8n REST API to activate the workflow (per PRD BR-06 /
 #         TRD TR-09). Sets operational_status and n8n_activated based on whether
 #         the n8n API call succeeds or fails:
@@ -45,7 +52,7 @@
 #
 # ── PR title convention (REQUIRED) ───────────────────────────────────────────
 #   All COE workflow PRs MUST use the title format: "Publish: <asset_name>"
-#   e.g. "Publish: fathom_to_slack"
+#   e.g. "Publish: fathom-to-slack"
 #   Without this prefix, asset_name is derived from the raw title which may
 #   not match the registered asset_name in the DB.
 #
@@ -58,20 +65,36 @@
 #   N8N_API_URL           — n8n instance API base URL e.g. https://n8n.host/api/v1
 #   N8N_API_KEY           — n8n API key (from Settings > n8n API)
 #
-# ── V1 known gaps (not blocking demo) ────────────────────────────────────────
+# ── KPI reconciliation behaviour (v2.2) ──────────────────────────────────────
+#   On merge, Job 3 reads kpi-snapshot.json and reconciles two fields:
+#     manual_time_minutes_per_run
+#     estimated_runs_per_week
+#   COALESCE logic:
+#     - File present + valid integers  → DB updated to file values
+#     - File missing                   → DB unchanged (keeps Claude's stored values)
+#     - File present but invalid JSON  → DB unchanged + warning logged
+#     - Field null or non-integer      → DB unchanged for that field
+#   This means a reviewer can edit kpi-snapshot.json in the PR and their
+#   values will always land in the DB on merge — no manual DB update needed.
+#
+# ── V1 known gaps (not blocking) ─────────────────────────────────────────────
 #   - mermaid_svg is not generated (server-side render is a V2 task).
 #   - gates_passed_at uses reviewer approval as proxy (see Job 2 note above).
 #   - No check_suite / CI gate event trigger — add in V2.
+#   - KPI sync is merge-time only — real-time sync on reviewer commit is V2.
 #
 # ── Fix log ───────────────────────────────────────────────────────────────────
+#   v2.2 — Added KPI reconciliation to Job 3.
+#          Reads kpi-snapshot.json from merged commit.
+#          Updates manual_time_minutes_per_run and estimated_runs_per_week
+#          via COALESCE in the final UPDATE query.
+#          Safe: COALESCE preserves DB values if file is absent or unparseable.
 #   v2.1 — Fixed "inconsistent types deduced for parameter $1" in Job 2.
-#          Root cause: $1 was referenced in two type contexts in one query
-#          (SET pipeline_status = $1::text AND CASE WHEN $1::text = '...').
+#          Root cause: $1 was referenced in two type contexts in one query.
 #          Fix: split into two separate queries so each $1 appears in exactly
 #          one type context. gates_passed_at is now set in a second conditional
 #          query, eliminating the ambiguity entirely.
-#          Also removed ::text casts from Job 3 operational_status — single-use
-#          parameters don't need explicit casts; PostgreSQL infers from column.
+#          Also removed ::text casts from Job 3 operational_status.
 # =============================================================================
 
 name: COE Asset Registry — PR Lifecycle Tracker
@@ -132,7 +155,7 @@ jobs:
             const n8nWorkflowId = wfIdMatch ? wfIdMatch[1] : null;
 
             // Fallback INSERT only — extracts submitter from PR body line:
-            // **Submitted by:** Vishal Mishra (vishalm@devsavant.com)
+            // **Submitted by:** Vishal Mishra (vishalm@fulcrumapp.com)
             const submitterMatch = prBody.match(
               /\*\*Submitted by:\*\*\s*([^(\n]+?)(?:\s*\(([^)]+)\))?(?:\n|$)/
             );
@@ -157,7 +180,7 @@ jobs:
                 pr_raised_by, submitted_at, n8n_workflow_id
               ) VALUES (
                 $1, 'n8n_workflow', 'claude', $2,
-                $3, $4, 'devsavant',
+                $3, $4, 'fulcrum',
                 '{}', '[]', 'read-only',
                 'submitted',
                 $5, $6, $7, $8, $9::timestamptz, $10
@@ -310,10 +333,17 @@ jobs:
 
 
 # =============================================================================
-# JOB 3 — PR merged  →  approved + docs ingested + n8n activation attempted
+# JOB 3 — PR merged  →  approved + docs ingested + KPI reconciled + n8n activation
+#
+# NEW in v2.2: KPI reconciliation
+#   Reads kpi-snapshot.json from the merged commit.
+#   Parses manual_time_minutes_per_run and estimated_runs_per_week.
+#   Updates the DB via COALESCE — file values win if valid integers are present;
+#   existing DB values are preserved if the file is missing or unparseable.
+#   This means reviewer edits to kpi-snapshot.json always land in the DB on merge.
 # =============================================================================
   on-pr-merged:
-    name: "Registry: mark approved + ingest docs + activate n8n"
+    name: "Registry: mark approved + ingest docs + reconcile KPIs + activate n8n"
     if: >-
       github.event_name == 'pull_request' &&
       github.event.action == 'closed' &&
@@ -329,7 +359,7 @@ jobs:
       - name: Install pg client library
         run: npm install pg
 
-      - name: Read committed files + update registry → approved + activate n8n
+      - name: Read committed files + reconcile KPIs + update registry → approved + activate n8n
         env:
           PG_CONNECTION_STRING: ${{ secrets.PG_CONNECTION_STRING }}
           N8N_API_URL:  ${{ secrets.N8N_API_URL }}
@@ -353,10 +383,10 @@ jobs:
             const mergedAt = process.env.PR_MERGED_AT;
             const mergedBy = process.env.MERGED_BY || 'unknown';
 
-            // Derive file paths from asset name
-            // "Publish: Sample - Cat Fact - Fetch and Format"
-            //   → assetName: "Sample - Cat Fact - Fetch and Format"
-            //   → kebab:     "sample-cat-fact-fetch-and-format"
+            // ── Derive file paths from asset name ─────────────────────────
+            // "Publish: my-automation-name"
+            //   → assetName: "my-automation-name"
+            //   → kebab:     "my-automation-name"
             const assetName = prTitle.startsWith('Publish: ')
               ? prTitle.slice(9).trim()
               : prTitle.trim();
@@ -369,7 +399,9 @@ jobs:
             const jsonPath    = path.join('workflows', `${kebab}.json`);
             const contextPath = path.join('workflows', kebab, 'context.md');
             const reportPath  = path.join('workflows', kebab, 'testing-report.md');
+            const kpiPath     = path.join('workflows', kebab, 'kpi-snapshot.json');
 
+            // ── Read workflow files ───────────────────────────────────────
             const workflowJson = fs.existsSync(jsonPath)
               ? JSON.parse(fs.readFileSync(jsonPath, 'utf8'))
               : null;
@@ -386,13 +418,50 @@ jobs:
               if (m) mermaidSource = m[1].trim();
             }
 
-            console.log(`📁 Asset:  "${assetName}"  (kebab: ${kebab})`);
-            console.log(`📂 Files:  json=${!!workflowJson}  context=${!!contextDoc}  report=${!!testingReport}  mermaid=${!!mermaidSource}`);
+            // ── Read and parse kpi-snapshot.json (v2.2) ──────────────────
+            // COALESCE strategy: only update DB fields where we get a valid
+            // positive integer from the file. Null = leave DB value intact.
+            let kpiManualTime  = null;
+            let kpiRunsPerWeek = null;
 
-            // ── n8n activation ────────────────────────────────────────────
+            if (fs.existsSync(kpiPath)) {
+              try {
+                const kpiRaw  = fs.readFileSync(kpiPath, 'utf8');
+                const kpiData = JSON.parse(kpiRaw);
+
+                // Validate: must be a positive integer to count
+                const mt = kpiData.manual_time_minutes_per_run;
+                const rw = kpiData.estimated_runs_per_week;
+
+                kpiManualTime  = (Number.isInteger(mt) && mt > 0) ? mt : null;
+                kpiRunsPerWeek = (Number.isInteger(rw) && rw > 0) ? rw : null;
+
+                console.log(`📊 KPI snapshot found:`);
+                console.log(`   manual_time_minutes_per_run : ${kpiManualTime  ?? '(invalid or missing — DB unchanged)'}`);
+                console.log(`   estimated_runs_per_week     : ${kpiRunsPerWeek ?? '(invalid or missing — DB unchanged)'}`);
+
+                // Warn if asset_name in file doesn't match the PR title
+                if (kpiData.asset_name && kpiData.asset_name !== assetName) {
+                  console.warn(`⚠️  kpi-snapshot.json asset_name "${kpiData.asset_name}" does not match PR asset_name "${assetName}".`);
+                  console.warn(`   KPI values will still be applied — verify the file is correct.`);
+                }
+              } catch (err) {
+                console.warn(`⚠️  kpi-snapshot.json found but could not be parsed: ${err.message}`);
+                console.warn(`   KPI fields will not be updated — DB values preserved.`);
+              }
+            } else {
+              console.warn(`⚠️  kpi-snapshot.json not found at ${kpiPath}`);
+              console.warn(`   KPI fields will not be updated — DB values preserved.`);
+            }
+
+            console.log(`\n📁 Asset:  "${assetName}"  (kebab: ${kebab})`);
+            console.log(`📂 Files:  json=${!!workflowJson}  context=${!!contextDoc}  report=${!!testingReport}  mermaid=${!!mermaidSource}  kpi=${kpiManualTime !== null || kpiRunsPerWeek !== null}`);
+
+            // ── Connect to DB ─────────────────────────────────────────────
             const pgClient = new Client({ connectionString: process.env.PG_CONNECTION_STRING });
             await pgClient.connect();
 
+            // ── n8n activation ────────────────────────────────────────────
             const lookupResult = await pgClient.query(
               `SELECT n8n_workflow_id FROM coe_asset_registry WHERE github_pr_number = $1`,
               [prNumber]
@@ -409,7 +478,7 @@ jobs:
             } else {
               try {
                 const n8nUrl = `${process.env.N8N_API_URL.replace(/\/$/, '')}/workflows/${n8nWorkflowId}/activate`;
-                console.log(`🔌 Activating n8n workflow: ${n8nUrl}`);
+                console.log(`\n🔌 Activating n8n workflow: ${n8nUrl}`);
 
                 await new Promise((resolve, reject) => {
                   const url     = new URL(n8nUrl);
@@ -442,39 +511,67 @@ jobs:
               }
             }
 
-            const operationalStatus = activationSuccess ? 'active'  : 'inactive';
+            const operationalStatus = activationSuccess ? 'active'   : 'inactive';
             const n8nActivated      = activationSuccess;
-            const activatedAt       = activationSuccess ? mergedAt  : null;
+            const activatedAt       = activationSuccess ? mergedAt   : null;
 
-            // Each parameter used in exactly one type context — no ambiguity.
+            // ── Final UPDATE — approved + docs + KPI reconciliation ───────
+            //
+            // KPI COALESCE logic:
+            //   COALESCE($11, manual_time_minutes_per_run)
+            //     → if kpiManualTime is a valid integer: use it (reviewer's value)
+            //     → if kpiManualTime is null:            keep existing DB value
+            //   Same for estimated_runs_per_week.
+            //
+            // Each parameter is used in exactly one type context — no ambiguity.
+            // Parameters:
+            //   $1  operational_status
+            //   $2  approved_at (timestamptz)
+            //   $3  n8n_activated (boolean)
+            //   $4  activated_at (timestamptz)
+            //   $5  workflow_json (jsonb)
+            //   $6  context_doc (text)
+            //   $7  testing_report_doc (text)
+            //   $8  mermaid_source (text)
+            //   $9  reviewed_by fallback (text)
+            //   $10 github_pr_number lookup key (int)
+            //   $11 manual_time_minutes_per_run from kpi-snapshot.json (int or null)
+            //   $12 estimated_runs_per_week from kpi-snapshot.json (int or null)
             const updateResult = await pgClient.query(
               `
               UPDATE coe_asset_registry SET
-                pipeline_status    = 'approved',
-                operational_status = $1,
-                pr_merged          = TRUE,
-                approved_at        = $2::timestamptz,
-                n8n_activated      = $3,
-                activated_at       = $4::timestamptz,
-                workflow_json      = $5::jsonb,
-                context_doc        = $6,
-                testing_report_doc = $7,
-                mermaid_source     = $8,
-                reviewed_by        = COALESCE(reviewed_by, $9)
+                pipeline_status             = 'approved',
+                operational_status          = $1,
+                pr_merged                   = TRUE,
+                approved_at                 = $2::timestamptz,
+                n8n_activated               = $3,
+                activated_at                = $4::timestamptz,
+                workflow_json               = $5::jsonb,
+                context_doc                 = $6,
+                testing_report_doc          = $7,
+                mermaid_source              = $8,
+                reviewed_by                 = COALESCE(reviewed_by, $9),
+                manual_time_minutes_per_run = COALESCE($11, manual_time_minutes_per_run),
+                estimated_runs_per_week     = COALESCE($12, estimated_runs_per_week)
               WHERE github_pr_number = $10
-              RETURNING asset_name, id, reviewed_by
+              RETURNING asset_name, id, reviewed_by,
+                        manual_time_minutes_per_run, estimated_runs_per_week
               `,
               [
-                operationalStatus,
-                mergedAt,
-                n8nActivated,
-                activatedAt,
-                workflowJson ? JSON.stringify(workflowJson) : null,
-                contextDoc,
-                testingReport,
-                mermaidSource,
-                mergedBy,
-                prNumber,
+                operationalStatus,           // $1
+                mergedAt,                    // $2
+                n8nActivated,                // $3
+                activatedAt,                 // $4
+                workflowJson
+                  ? JSON.stringify(workflowJson)
+                  : null,                    // $5
+                contextDoc,                  // $6
+                testingReport,               // $7
+                mermaidSource,               // $8
+                mergedBy,                    // $9
+                prNumber,                    // $10
+                kpiManualTime,               // $11 — null = COALESCE keeps DB value
+                kpiRunsPerWeek,              // $12 — null = COALESCE keeps DB value
               ]
             );
 
@@ -485,14 +582,19 @@ jobs:
               process.exit(1);
             }
 
-            const { asset_name, id, reviewed_by } = updateResult.rows[0];
-            console.log(`✅ [PR #${prNumber}] "${asset_name}" → approved`);
-            console.log(`   Registry ID:        ${id}`);
-            console.log(`   operational_status: ${operationalStatus}${activationError ? ' ⚠️ (activation failed)' : ''}`);
-            console.log(`   n8n ID:             ${n8nWorkflowId || '(not set)'}`);
-            console.log(`   Reviewed by:        ${reviewed_by || '(not recorded)'}`);
-            console.log(`   Merged by:          ${mergedBy}`);
-            console.log(`   Docs:               json=${!!workflowJson}  context=${!!contextDoc}  report=${!!testingReport}  mermaid=${!!mermaidSource}`);
+            const { asset_name, id, reviewed_by,
+                    manual_time_minutes_per_run,
+                    estimated_runs_per_week } = updateResult.rows[0];
+
+            console.log(`\n✅ [PR #${prNumber}] "${asset_name}" → approved`);
+            console.log(`   Registry ID:                ${id}`);
+            console.log(`   operational_status:         ${operationalStatus}${activationError ? ' ⚠️ (activation failed — retry manually in n8n)' : ''}`);
+            console.log(`   n8n ID:                     ${n8nWorkflowId || '(not set)'}`);
+            console.log(`   Reviewed by:                ${reviewed_by || '(not recorded)'}`);
+            console.log(`   Merged by:                  ${mergedBy}`);
+            console.log(`   manual_time_minutes_per_run: ${manual_time_minutes_per_run ?? '(null)'}`);
+            console.log(`   estimated_runs_per_week:     ${estimated_runs_per_week ?? '(null)'}`);
+            console.log(`   Docs: json=${!!workflowJson}  context=${!!contextDoc}  report=${!!testingReport}  mermaid=${!!mermaidSource}`);
           })().catch(err => {
             console.error('❌ Registry update failed:', err.message);
             process.exit(1);
