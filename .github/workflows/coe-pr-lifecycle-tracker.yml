@@ -1,6 +1,6 @@
 # =============================================================================
 # COE Asset Registry — PR Lifecycle Tracker
-# Version: 2.2
+# Version: 2.3
 # Aligned: PRD v1.6 (BR-06), TRD v1.2 (TR-09), schema v5
 # =============================================================================
 #
@@ -48,7 +48,9 @@
 #
 # ── Lookup strategy ───────────────────────────────────────────────────────────
 #   Job 1 (PR open): UPSERT by asset_name parsed from PR title
-#   Jobs 2 & 3:      UPDATE by github_pr_number (indexed, written in Job 1)
+#   Job 2:           UPDATE by github_pr_number
+#   Job 3 (v2.3):    UPDATE by github_pr_number PRIMARY
+#                            by asset_name       FALLBACK (self-healing)
 #
 # ── PR title convention (REQUIRED) ───────────────────────────────────────────
 #   All COE workflow PRs MUST use the title format: "Publish: <asset_name>"
@@ -84,6 +86,11 @@
 #   - KPI sync is merge-time only — real-time sync on reviewer commit is V2.
 #
 # ── Fix log ───────────────────────────────────────────────────────────────────
+#   v2.3 — Added asset_name fallback lookup to Job 3.
+#          Primary: WHERE github_pr_number = <PR number> (fast, indexed).
+#          Fallback: WHERE asset_name = <from PR title> (stable, self-healing).
+#          When fallback fires, github_pr_number is repaired on the DB row.
+#          Also added GITHUB_REPOSITORY env var to Job 3 for PR URL repair.
 #   v2.2 — Added KPI reconciliation to Job 3.
 #          Reads kpi-snapshot.json from merged commit.
 #          Updates manual_time_minutes_per_run and estimated_runs_per_week
@@ -333,14 +340,34 @@ jobs:
 
 
 # =============================================================================
-# JOB 3 — PR merged  →  approved + docs ingested + KPI reconciled + n8n activation
+# JOB 3 — PR merged → approved + docs ingested + KPI reconciled + n8n activation
 #
-# NEW in v2.2: KPI reconciliation
+# v2.2: KPI reconciliation
 #   Reads kpi-snapshot.json from the merged commit.
 #   Parses manual_time_minutes_per_run and estimated_runs_per_week.
-#   Updates the DB via COALESCE — file values win if valid integers are present;
-#   existing DB values are preserved if the file is missing or unparseable.
-#   This means reviewer edits to kpi-snapshot.json always land in the DB on merge.
+#   Updates the DB via COALESCE — file values win if valid positive integers
+#   are present; existing DB values are preserved if the file is missing or
+#   unparseable.
+#
+# v2.3: Self-healing dual lookup (PRIMARY by PR number, FALLBACK by asset_name)
+#
+#   Problem this solves:
+#     Job 3 previously looked up the DB row exclusively by github_pr_number.
+#     If that number did not match (e.g. a re-raised PR, number drift, or Job 1
+#     firing against a different PR), the UPDATE found zero rows and the job
+#     failed with "No registry row found for PR #N".
+#
+#   Fix — two-stage lookup:
+#     Stage 1: SELECT WHERE github_pr_number = <current PR number>
+#       Fast, indexed, correct for the normal path.
+#     Stage 2 (only if Stage 1 returns nothing):
+#       SELECT WHERE asset_name = <asset_name parsed from PR title>
+#       asset_name is set at registration and never changes — always a safe key.
+#       If found: repairs github_pr_number on the row so future lookups work.
+#
+#   The final UPDATE WHERE clause switches in JavaScript based on which stage
+#   succeeded — the correct row is always targeted.
+#   n8n_workflow_id lookup follows the same primary/fallback pattern.
 # =============================================================================
   on-pr-merged:
     name: "Registry: mark approved + ingest docs + reconcile KPIs + activate n8n"
@@ -359,7 +386,7 @@ jobs:
       - name: Install pg client library
         run: npm install pg
 
-      - name: Read committed files + reconcile KPIs + update registry → approved + activate n8n
+      - name: Read files + reconcile KPIs + update registry -> approved + activate n8n
         env:
           PG_CONNECTION_STRING: ${{ secrets.PG_CONNECTION_STRING }}
           N8N_API_URL:  ${{ secrets.N8N_API_URL }}
@@ -368,6 +395,7 @@ jobs:
           PR_NUMBER:    ${{ github.event.pull_request.number }}
           PR_MERGED_AT: ${{ github.event.pull_request.merged_at }}
           MERGED_BY:    ${{ github.event.pull_request.merged_by.login }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
 
         run: |
           node << 'SCRIPT'
@@ -383,10 +411,7 @@ jobs:
             const mergedAt = process.env.PR_MERGED_AT;
             const mergedBy = process.env.MERGED_BY || 'unknown';
 
-            // ── Derive file paths from asset name ─────────────────────────
-            // "Publish: my-automation-name"
-            //   → assetName: "my-automation-name"
-            //   → kebab:     "my-automation-name"
+            // Derive asset name and file paths from PR title
             const assetName = prTitle.startsWith('Publish: ')
               ? prTitle.slice(9).trim()
               : prTitle.trim();
@@ -401,7 +426,7 @@ jobs:
             const reportPath  = path.join('workflows', kebab, 'testing-report.md');
             const kpiPath     = path.join('workflows', kebab, 'kpi-snapshot.json');
 
-            // ── Read workflow files ───────────────────────────────────────
+            // Read workflow files
             const workflowJson = fs.existsSync(jsonPath)
               ? JSON.parse(fs.readFileSync(jsonPath, 'utf8'))
               : null;
@@ -418,68 +443,111 @@ jobs:
               if (m) mermaidSource = m[1].trim();
             }
 
-            // ── Read and parse kpi-snapshot.json (v2.2) ──────────────────
-            // COALESCE strategy: only update DB fields where we get a valid
-            // positive integer from the file. Null = leave DB value intact.
+            // Read and parse kpi-snapshot.json
+            // COALESCE strategy: only update DB fields with a valid positive integer.
+            // null means leave the existing DB value intact.
             let kpiManualTime  = null;
             let kpiRunsPerWeek = null;
 
             if (fs.existsSync(kpiPath)) {
               try {
-                const kpiRaw  = fs.readFileSync(kpiPath, 'utf8');
-                const kpiData = JSON.parse(kpiRaw);
-
-                // Validate: must be a positive integer to count
+                const kpiData = JSON.parse(fs.readFileSync(kpiPath, 'utf8'));
                 const mt = kpiData.manual_time_minutes_per_run;
                 const rw = kpiData.estimated_runs_per_week;
-
                 kpiManualTime  = (Number.isInteger(mt) && mt > 0) ? mt : null;
                 kpiRunsPerWeek = (Number.isInteger(rw) && rw > 0) ? rw : null;
-
                 console.log(`📊 KPI snapshot found:`);
-                console.log(`   manual_time_minutes_per_run : ${kpiManualTime  ?? '(invalid or missing — DB unchanged)'}`);
-                console.log(`   estimated_runs_per_week     : ${kpiRunsPerWeek ?? '(invalid or missing — DB unchanged)'}`);
-
-                // Warn if asset_name in file doesn't match the PR title
+                console.log(`   manual_time_minutes_per_run : ${kpiManualTime  ?? '(invalid — DB unchanged)'}`);
+                console.log(`   estimated_runs_per_week     : ${kpiRunsPerWeek ?? '(invalid — DB unchanged)'}`);
                 if (kpiData.asset_name && kpiData.asset_name !== assetName) {
-                  console.warn(`⚠️  kpi-snapshot.json asset_name "${kpiData.asset_name}" does not match PR asset_name "${assetName}".`);
-                  console.warn(`   KPI values will still be applied — verify the file is correct.`);
+                  console.warn(`⚠️  kpi-snapshot.json asset_name "${kpiData.asset_name}" != PR asset_name "${assetName}" — values still applied.`);
                 }
               } catch (err) {
-                console.warn(`⚠️  kpi-snapshot.json found but could not be parsed: ${err.message}`);
-                console.warn(`   KPI fields will not be updated — DB values preserved.`);
+                console.warn(`⚠️  kpi-snapshot.json parse error: ${err.message} — DB KPI values preserved.`);
               }
             } else {
-              console.warn(`⚠️  kpi-snapshot.json not found at ${kpiPath}`);
-              console.warn(`   KPI fields will not be updated — DB values preserved.`);
+              console.warn(`⚠️  kpi-snapshot.json not found at ${kpiPath} — DB KPI values preserved.`);
             }
 
             console.log(`\n📁 Asset:  "${assetName}"  (kebab: ${kebab})`);
             console.log(`📂 Files:  json=${!!workflowJson}  context=${!!contextDoc}  report=${!!testingReport}  mermaid=${!!mermaidSource}  kpi=${kpiManualTime !== null || kpiRunsPerWeek !== null}`);
 
-            // ── Connect to DB ─────────────────────────────────────────────
+            // Connect to DB
             const pgClient = new Client({ connectionString: process.env.PG_CONNECTION_STRING });
             await pgClient.connect();
 
-            // ── n8n activation ────────────────────────────────────────────
-            const lookupResult = await pgClient.query(
-              `SELECT n8n_workflow_id FROM coe_asset_registry WHERE github_pr_number = $1`,
+            // ── Dual lookup: PRIMARY by PR number, FALLBACK by asset_name ──
+            //
+            // Stage 1 — by github_pr_number (fast, indexed, normal path)
+            // Stage 2 — by asset_name (stable fallback when PR number drifted)
+            //
+            // When fallback fires:
+            //   - github_pr_number is repaired on the row to the current PR number
+            //   - Final UPDATE uses WHERE asset_name = $10 for that run
+
+            let lookupByPrNumber = true;
+            let n8nWorkflowId    = null;
+
+            const byPr = await pgClient.query(
+              `SELECT id, n8n_workflow_id FROM coe_asset_registry WHERE github_pr_number = $1`,
               [prNumber]
             );
-            const n8nWorkflowId = lookupResult.rows[0]?.n8n_workflow_id || null;
 
+            if (byPr.rows.length > 0) {
+              n8nWorkflowId = byPr.rows[0].n8n_workflow_id || null;
+              console.log(`\n🔍 Row found by PR number #${prNumber} (primary lookup)`);
+            } else {
+              console.warn(`\n⚠️  No row found for PR #${prNumber} — trying fallback lookup by asset_name "${assetName}"...`);
+
+              const byName = await pgClient.query(
+                `SELECT id, n8n_workflow_id, github_pr_number
+                 FROM coe_asset_registry
+                 WHERE asset_name = $1`,
+                [assetName]
+              );
+
+              if (byName.rows.length > 0) {
+                n8nWorkflowId    = byName.rows[0].n8n_workflow_id || null;
+                lookupByPrNumber = false;
+                const oldPrNumber = byName.rows[0].github_pr_number;
+
+                console.log(`   Row found by asset_name fallback (DB had PR #${oldPrNumber} — merging as PR #${prNumber})`);
+                console.log(`   Repairing github_pr_number: ${oldPrNumber} → ${prNumber}`);
+
+                // Repair so future lookups by PR number work correctly
+                await pgClient.query(
+                  `UPDATE coe_asset_registry
+                   SET github_pr_number = $1,
+                       github_pr_url    = $2
+                   WHERE asset_name = $3`,
+                  [
+                    prNumber,
+                    `https://github.com/${process.env.GITHUB_REPOSITORY}/pull/${prNumber}`,
+                    assetName,
+                  ]
+                );
+                console.log(`   github_pr_number repaired ✅`);
+              } else {
+                console.error(`❌ No row found for PR #${prNumber} or asset_name "${assetName}".`);
+                console.error(`   Register the asset via the COE registry MCP tool, then re-run this job.`);
+                await pgClient.end();
+                process.exit(1);
+              }
+            }
+
+            // n8n activation
             let activationSuccess = false;
             let activationError   = null;
 
             if (!process.env.N8N_API_URL || !process.env.N8N_API_KEY) {
-              console.warn(`⚠️  N8N_API_URL or N8N_API_KEY not set — skipping activation.`);
+              console.warn(`\n⚠️  N8N_API_URL or N8N_API_KEY not set — skipping activation.`);
             } else if (!n8nWorkflowId) {
-              console.warn(`⚠️  n8n_workflow_id not in registry for PR #${prNumber} — skipping activation.`);
+              console.warn(`\n⚠️  n8n_workflow_id not set in registry — skipping activation.`);
+              console.warn(`   Activate manually via n8n UI or API once the workflow ID is registered.`);
             } else {
               try {
                 const n8nUrl = `${process.env.N8N_API_URL.replace(/\/$/, '')}/workflows/${n8nWorkflowId}/activate`;
                 console.log(`\n🔌 Activating n8n workflow: ${n8nUrl}`);
-
                 await new Promise((resolve, reject) => {
                   const url     = new URL(n8nUrl);
                   const lib     = url.protocol === 'https:' ? https : http;
@@ -501,13 +569,12 @@ jobs:
                   req.on('error', reject);
                   req.end();
                 });
-
                 activationSuccess = true;
                 console.log(`✅ n8n workflow ${n8nWorkflowId} activated.`);
               } catch (err) {
                 activationError = err.message;
                 console.error(`❌ n8n activation failed: ${err.message}`);
-                console.error(`   Set operational_status = inactive. Retry manually in n8n.`);
+                console.error(`   operational_status set to 'inactive'. Retry manually in n8n.`);
               }
             }
 
@@ -515,15 +582,10 @@ jobs:
             const n8nActivated      = activationSuccess;
             const activatedAt       = activationSuccess ? mergedAt   : null;
 
-            // ── Final UPDATE — approved + docs + KPI reconciliation ───────
+            // Final UPDATE
+            // WHERE clause switches based on which lookup succeeded.
+            // KPI COALESCE: valid integer from file wins; null preserves DB value.
             //
-            // KPI COALESCE logic:
-            //   COALESCE($11, manual_time_minutes_per_run)
-            //     → if kpiManualTime is a valid integer: use it (reviewer's value)
-            //     → if kpiManualTime is null:            keep existing DB value
-            //   Same for estimated_runs_per_week.
-            //
-            // Each parameter is used in exactly one type context — no ambiguity.
             // Parameters:
             //   $1  operational_status
             //   $2  approved_at (timestamptz)
@@ -534,9 +596,15 @@ jobs:
             //   $7  testing_report_doc (text)
             //   $8  mermaid_source (text)
             //   $9  reviewed_by fallback (text)
-            //   $10 github_pr_number lookup key (int)
+            //   $10 lookup value — prNumber (int) OR assetName (text)
             //   $11 manual_time_minutes_per_run from kpi-snapshot.json (int or null)
             //   $12 estimated_runs_per_week from kpi-snapshot.json (int or null)
+
+            const whereClause = lookupByPrNumber
+              ? `WHERE github_pr_number = $10`
+              : `WHERE asset_name = $10`;
+            const lookupValue = lookupByPrNumber ? prNumber : assetName;
+
             const updateResult = await pgClient.query(
               `
               UPDATE coe_asset_registry SET
@@ -553,45 +621,48 @@ jobs:
                 reviewed_by                 = COALESCE(reviewed_by, $9),
                 manual_time_minutes_per_run = COALESCE($11, manual_time_minutes_per_run),
                 estimated_runs_per_week     = COALESCE($12, estimated_runs_per_week)
-              WHERE github_pr_number = $10
+              ${whereClause}
               RETURNING asset_name, id, reviewed_by,
                         manual_time_minutes_per_run, estimated_runs_per_week
               `,
               [
-                operationalStatus,           // $1
-                mergedAt,                    // $2
-                n8nActivated,                // $3
-                activatedAt,                 // $4
-                workflowJson
-                  ? JSON.stringify(workflowJson)
-                  : null,                    // $5
-                contextDoc,                  // $6
-                testingReport,               // $7
-                mermaidSource,               // $8
-                mergedBy,                    // $9
-                prNumber,                    // $10
-                kpiManualTime,               // $11 — null = COALESCE keeps DB value
-                kpiRunsPerWeek,              // $12 — null = COALESCE keeps DB value
+                operationalStatus,
+                mergedAt,
+                n8nActivated,
+                activatedAt,
+                workflowJson ? JSON.stringify(workflowJson) : null,
+                contextDoc,
+                testingReport,
+                mermaidSource,
+                mergedBy,
+                lookupValue,
+                kpiManualTime,
+                kpiRunsPerWeek,
               ]
             );
 
             await pgClient.end();
 
             if (updateResult.rowCount === 0) {
-              console.error(`❌ No registry row found for PR #${prNumber}.`);
+              console.error(`❌ Final UPDATE matched zero rows — this should not happen after a successful lookup.`);
               process.exit(1);
             }
 
-            const { asset_name, id, reviewed_by,
-                    manual_time_minutes_per_run,
-                    estimated_runs_per_week } = updateResult.rows[0];
+            const {
+              asset_name,
+              id,
+              reviewed_by,
+              manual_time_minutes_per_run,
+              estimated_runs_per_week,
+            } = updateResult.rows[0];
 
-            console.log(`\n✅ [PR #${prNumber}] "${asset_name}" → approved`);
-            console.log(`   Registry ID:                ${id}`);
-            console.log(`   operational_status:         ${operationalStatus}${activationError ? ' ⚠️ (activation failed — retry manually in n8n)' : ''}`);
-            console.log(`   n8n ID:                     ${n8nWorkflowId || '(not set)'}`);
-            console.log(`   Reviewed by:                ${reviewed_by || '(not recorded)'}`);
-            console.log(`   Merged by:                  ${mergedBy}`);
+            console.log(`\n✅ [PR #${prNumber}] "${asset_name}" -> approved`);
+            console.log(`   Registry ID:                 ${id}`);
+            console.log(`   Lookup used:                 ${lookupByPrNumber ? 'PR number (primary)' : 'asset_name (fallback)'}`);
+            console.log(`   operational_status:          ${operationalStatus}${activationError ? ' ⚠️  (activation failed — retry manually in n8n)' : ''}`);
+            console.log(`   n8n ID:                      ${n8nWorkflowId || '(not set)'}`);
+            console.log(`   Reviewed by:                 ${reviewed_by || '(not recorded)'}`);
+            console.log(`   Merged by:                   ${mergedBy}`);
             console.log(`   manual_time_minutes_per_run: ${manual_time_minutes_per_run ?? '(null)'}`);
             console.log(`   estimated_runs_per_week:     ${estimated_runs_per_week ?? '(null)'}`);
             console.log(`   Docs: json=${!!workflowJson}  context=${!!contextDoc}  report=${!!testingReport}  mermaid=${!!mermaidSource}`);
