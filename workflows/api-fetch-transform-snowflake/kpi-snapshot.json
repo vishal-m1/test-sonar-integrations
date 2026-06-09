@@ -1,0 +1,7 @@
+{
+  "asset_name": "api-fetch-transform-snowflake",
+  "manual_time_minutes_per_run": 10,
+  "estimated_runs_per_week": 35,
+  "snapshot_generated_at": "2026-06-09T07:35:00Z",
+  "snapshot_generated_by": "vishalm.mishra@fulcrumapp.com"
+}
