@@ -1,6 +1,6 @@
 # =============================================================================
 # COE Asset Registry — PR Lifecycle Tracker
-# Version: 2.3
+# Version: 2.4
 # Aligned: PRD v1.6 (BR-06), TRD v1.2 (TR-09), schema v5
 # =============================================================================
 #
@@ -40,7 +40,9 @@
 #         if the file is missing or unparseable.
 #
 #         Then: calls n8n REST API to activate the workflow (per PRD BR-06 /
-#         TRD TR-09). Sets operational_status and n8n_activated based on whether
+#         TRD TR-09). Uses PATCH /workflows/:id with { "active": true } body
+#         (correct n8n v1 REST API — there is no /activate sub-path).
+#         Sets operational_status and n8n_activated based on whether
 #         the n8n API call succeeds or fails:
 #           success → operational_status = 'active',   n8n_activated = TRUE
 #           failure → operational_status = 'inactive', n8n_activated = FALSE
@@ -86,6 +88,11 @@
 #   - KPI sync is merge-time only — real-time sync on reviewer commit is V2.
 #
 # ── Fix log ───────────────────────────────────────────────────────────────────
+#   v2.4 — Fixed n8n activation endpoint.
+#          Previous: POST /api/v1/workflows/:id/activate (does not exist → 404)
+#          Fixed:    PATCH /api/v1/workflows/:id with body { "active": true }
+#          Also added Content-Type: application/json header and correct
+#          Content-Length based on body bytes (was '0' with no body).
 #   v2.3 — Added asset_name fallback lookup to Job 3.
 #          Primary: WHERE github_pr_number = <PR number> (fast, indexed).
 #          Fallback: WHERE asset_name = <from PR title> (stable, self-healing).
@@ -146,21 +153,17 @@ jobs:
           node << 'SCRIPT'
           (async () => {
             const { Client } = require('pg');
-
             const prTitle  = process.env.PR_TITLE  || '';
             const prBody   = process.env.PR_BODY   || '';
             const prAuthor = process.env.PR_AUTHOR || 'unknown';
-
             // PR title MUST follow "Publish: <asset_name>" convention.
             const assetName = prTitle.startsWith('Publish: ')
               ? prTitle.slice(9).trim()
               : prTitle.trim();
-
             // Fallback INSERT only — extracts n8n ID from PR body line:
             // **n8n Workflow ID:** cXBOQCYvOSK0b77n
             const wfIdMatch     = prBody.match(/\*\*n8n Workflow ID:\*\*\s*(\S+)/);
             const n8nWorkflowId = wfIdMatch ? wfIdMatch[1] : null;
-
             // Fallback INSERT only — extracts submitter from PR body line:
             // **Submitted by:** Vishal Mishra (vishalm@fulcrumapp.com)
             const submitterMatch = prBody.match(
@@ -170,12 +173,9 @@ jobs:
             const ownerEmail = (submitterMatch && submitterMatch[2])
               ? submitterMatch[2].trim()
               : `${prAuthor}@github.com`;
-
             const description = `PR #${process.env.PR_NUMBER} — ${assetName}`.slice(0, 250);
-
             const client = new Client({ connectionString: process.env.PG_CONNECTION_STRING });
             await client.connect();
-
             const result = await client.query(
               `
               INSERT INTO coe_asset_registry (
@@ -208,9 +208,7 @@ jobs:
                 prAuthor, process.env.PR_CREATED_AT, n8nWorkflowId,
               ]
             );
-
             await client.end();
-
             const row = result.rows[0];
             console.log(`✅ [PR #${process.env.PR_NUMBER}] "${row.asset_name}" → submitted`);
             console.log(`   Row ${row.was_inserted ? 'INSERTED (fallback)' : 'UPDATED (pre-registered)'}`);
@@ -221,8 +219,6 @@ jobs:
             process.exit(1);
           });
           SCRIPT
-
-
 # =============================================================================
 # JOB 2 — PR review submitted  →  'under_review' | 'rework_requested'
 #
@@ -243,7 +239,7 @@ jobs:
 #             $1 = newStatus, used exactly once → type inferred cleanly.
 #   Query B — updates gates_passed_at, runs only when newStatus = 'under_review'.
 #             Conditioned in JavaScript before the query is sent, so no
-#             parameter appears in two type contexts.
+#             parameter appears in two type contexts inside this query.
 # =============================================================================
   on-pr-reviewed:
     name: "Registry: record review"
@@ -267,22 +263,17 @@ jobs:
           node << 'SCRIPT'
           (async () => {
             const { Client } = require('pg');
-
             const reviewState = process.env.REVIEW_STATE || '';
             const prNumber    = parseInt(process.env.PR_NUMBER, 10);
-
             // Only act on reviews that carry a decision.
             // 'commented' does not change pipeline_status.
             if (!['approved', 'changes_requested'].includes(reviewState)) {
               console.log(`ℹ️  Review state "${reviewState}" — no registry update needed.`);
               process.exit(0);
             }
-
             const newStatus = reviewState === 'approved' ? 'under_review' : 'rework_requested';
-
             const client = new Client({ connectionString: process.env.PG_CONNECTION_STRING });
             await client.connect();
-
             // ── Query A: pipeline status + reviewer fields ─────────────────
             // $1 = newStatus  (used ONCE — type inferred cleanly from column)
             // $2 = reviewer
@@ -299,13 +290,11 @@ jobs:
               `,
               [newStatus, process.env.REVIEWER, process.env.REVIEW_BODY || null, prNumber]
             );
-
             if (result.rowCount === 0) {
               console.warn(`⚠️  No registry row found for PR #${prNumber}.`);
               await client.end();
               process.exit(0);
             }
-
             // ── Query B: gates_passed_at (only when moving to under_review) ─
             // Separate query avoids $1 dual-use ambiguity.
             // The condition is evaluated in JS — no parameter appears in
@@ -322,9 +311,7 @@ jobs:
               );
               console.log(`   gates_passed_at set to ${process.env.REVIEWED_AT}`);
             }
-
             await client.end();
-
             const { asset_name, id } = result.rows[0];
             console.log(`✅ [PR #${prNumber}] "${asset_name}" → ${newStatus}`);
             console.log(`   Reviewed by: ${process.env.REVIEWER}`);
@@ -337,17 +324,16 @@ jobs:
             process.exit(1);
           });
           SCRIPT
-
-
 # =============================================================================
 # JOB 3 — PR merged → approved + docs ingested + KPI reconciled + n8n activation
 #
-# v2.2: KPI reconciliation
-#   Reads kpi-snapshot.json from the merged commit.
-#   Parses manual_time_minutes_per_run and estimated_runs_per_week.
-#   Updates the DB via COALESCE — file values win if valid positive integers
-#   are present; existing DB values are preserved if the file is missing or
-#   unparseable.
+# v2.4: Fixed n8n activation endpoint.
+#   Previous (broken): POST /api/v1/workflows/:id/activate → 404
+#   Fixed:             PATCH /api/v1/workflows/:id with body { "active": true }
+#   The n8n REST API v1 has no /activate sub-path. The correct way to activate
+#   a workflow is to PATCH the workflow resource with active set to true.
+#   Also corrected Content-Type to application/json and Content-Length to
+#   reflect actual body byte length instead of hardcoded '0'.
 #
 # v2.3: Self-healing dual lookup (PRIMARY by PR number, FALLBACK by asset_name)
 #
@@ -368,6 +354,12 @@ jobs:
 #   The final UPDATE WHERE clause switches in JavaScript based on which stage
 #   succeeded — the correct row is always targeted.
 #   n8n_workflow_id lookup follows the same primary/fallback pattern.
+#
+# v2.2: Added KPI reconciliation to Job 3.
+#       Reads kpi-snapshot.json from merged commit.
+#       Updates manual_time_minutes_per_run and estimated_runs_per_week
+#       via COALESCE in the final UPDATE query.
+#       Safe: COALESCE preserves DB values if file is absent or unparseable.
 # =============================================================================
   on-pr-merged:
     name: "Registry: mark approved + ingest docs + reconcile KPIs + activate n8n"
@@ -405,27 +397,22 @@ jobs:
             const path  = require('path');
             const https = require('https');
             const http  = require('http');
-
             const prTitle  = process.env.PR_TITLE || '';
             const prNumber = parseInt(process.env.PR_NUMBER, 10);
             const mergedAt = process.env.PR_MERGED_AT;
             const mergedBy = process.env.MERGED_BY || 'unknown';
-
             // Derive asset name and file paths from PR title
             const assetName = prTitle.startsWith('Publish: ')
               ? prTitle.slice(9).trim()
               : prTitle.trim();
-
             const kebab = assetName
               .toLowerCase()
               .replace(/[^a-z0-9]+/g, '-')
               .replace(/^-|-$/g, '');
-
             const jsonPath    = path.join('workflows', `${kebab}.json`);
             const contextPath = path.join('workflows', kebab, 'context.md');
             const reportPath  = path.join('workflows', kebab, 'testing-report.md');
             const kpiPath     = path.join('workflows', kebab, 'kpi-snapshot.json');
-
             // Read workflow files
             const workflowJson = fs.existsSync(jsonPath)
               ? JSON.parse(fs.readFileSync(jsonPath, 'utf8'))
@@ -436,19 +423,16 @@ jobs:
             const testingReport = fs.existsSync(reportPath)
               ? fs.readFileSync(reportPath, 'utf8')
               : null;
-
             let mermaidSource = null;
             if (contextDoc) {
               const m = contextDoc.match(/```mermaid\r?\n([\s\S]*?)```/);
               if (m) mermaidSource = m[1].trim();
             }
-
             // Read and parse kpi-snapshot.json
             // COALESCE strategy: only update DB fields with a valid positive integer.
             // null means leave the existing DB value intact.
             let kpiManualTime  = null;
             let kpiRunsPerWeek = null;
-
             if (fs.existsSync(kpiPath)) {
               try {
                 const kpiData = JSON.parse(fs.readFileSync(kpiPath, 'utf8'));
@@ -468,14 +452,11 @@ jobs:
             } else {
               console.warn(`⚠️  kpi-snapshot.json not found at ${kpiPath} — DB KPI values preserved.`);
             }
-
             console.log(`\n📁 Asset:  "${assetName}"  (kebab: ${kebab})`);
             console.log(`📂 Files:  json=${!!workflowJson}  context=${!!contextDoc}  report=${!!testingReport}  mermaid=${!!mermaidSource}  kpi=${kpiManualTime !== null || kpiRunsPerWeek !== null}`);
-
             // Connect to DB
             const pgClient = new Client({ connectionString: process.env.PG_CONNECTION_STRING });
             await pgClient.connect();
-
             // ── Dual lookup: PRIMARY by PR number, FALLBACK by asset_name ──
             //
             // Stage 1 — by github_pr_number (fast, indexed, normal path)
@@ -484,36 +465,29 @@ jobs:
             // When fallback fires:
             //   - github_pr_number is repaired on the row to the current PR number
             //   - Final UPDATE uses WHERE asset_name = $10 for that run
-
             let lookupByPrNumber = true;
             let n8nWorkflowId    = null;
-
             const byPr = await pgClient.query(
               `SELECT id, n8n_workflow_id FROM coe_asset_registry WHERE github_pr_number = $1`,
               [prNumber]
             );
-
             if (byPr.rows.length > 0) {
               n8nWorkflowId = byPr.rows[0].n8n_workflow_id || null;
               console.log(`\n🔍 Row found by PR number #${prNumber} (primary lookup)`);
             } else {
               console.warn(`\n⚠️  No row found for PR #${prNumber} — trying fallback lookup by asset_name "${assetName}"...`);
-
               const byName = await pgClient.query(
                 `SELECT id, n8n_workflow_id, github_pr_number
                  FROM coe_asset_registry
                  WHERE asset_name = $1`,
                 [assetName]
               );
-
               if (byName.rows.length > 0) {
                 n8nWorkflowId    = byName.rows[0].n8n_workflow_id || null;
                 lookupByPrNumber = false;
                 const oldPrNumber = byName.rows[0].github_pr_number;
-
                 console.log(`   Row found by asset_name fallback (DB had PR #${oldPrNumber} — merging as PR #${prNumber})`);
                 console.log(`   Repairing github_pr_number: ${oldPrNumber} → ${prNumber}`);
-
                 // Repair so future lookups by PR number work correctly
                 await pgClient.query(
                   `UPDATE coe_asset_registry
@@ -534,11 +508,15 @@ jobs:
                 process.exit(1);
               }
             }
-
-            // n8n activation
+            // ── n8n activation (v2.4 fix) ──────────────────────────────────
+            //
+            // Correct n8n REST API v1 endpoint to activate a workflow:
+            //   PATCH /api/v1/workflows/:id   body: { "active": true }
+            //
+            // The previous version used POST /api/v1/workflows/:id/activate
+            // which does not exist in n8n and returns a 404.
             let activationSuccess = false;
             let activationError   = null;
-
             if (!process.env.N8N_API_URL || !process.env.N8N_API_KEY) {
               console.warn(`\n⚠️  N8N_API_URL or N8N_API_KEY not set — skipping activation.`);
             } else if (!n8nWorkflowId) {
@@ -546,8 +524,9 @@ jobs:
               console.warn(`   Activate manually via n8n UI or API once the workflow ID is registered.`);
             } else {
               try {
-                const n8nUrl = `${process.env.N8N_API_URL.replace(/\/$/, '')}/workflows/${n8nWorkflowId}/activate`;
-                console.log(`\n🔌 Activating n8n workflow: ${n8nUrl}`);
+                const n8nUrl = `${process.env.N8N_API_URL.replace(/\/$/, '')}/workflows/${n8nWorkflowId}`;
+                const body   = JSON.stringify({ active: true });
+                console.log(`\n🔌 Activating n8n workflow: PATCH ${n8nUrl}`);
                 await new Promise((resolve, reject) => {
                   const url     = new URL(n8nUrl);
                   const lib     = url.protocol === 'https:' ? https : http;
@@ -555,8 +534,12 @@ jobs:
                     hostname: url.hostname,
                     port:     url.port || (url.protocol === 'https:' ? 443 : 80),
                     path:     url.pathname,
-                    method:   'POST',
-                    headers:  { 'X-N8N-API-KEY': process.env.N8N_API_KEY, 'Content-Length': '0' }
+                    method:   'PATCH',
+                    headers:  {
+                      'X-N8N-API-KEY':  process.env.N8N_API_KEY,
+                      'Content-Type':   'application/json',
+                      'Content-Length': Buffer.byteLength(body),
+                    },
                   };
                   const req = lib.request(options, (res) => {
                     let body = '';
@@ -567,7 +550,7 @@ jobs:
                     });
                   });
                   req.on('error', reject);
-                  req.end();
+                  req.end(body);
                 });
                 activationSuccess = true;
                 console.log(`✅ n8n workflow ${n8nWorkflowId} activated.`);
@@ -577,11 +560,9 @@ jobs:
                 console.error(`   operational_status set to 'inactive'. Retry manually in n8n.`);
               }
             }
-
             const operationalStatus = activationSuccess ? 'active'   : 'inactive';
             const n8nActivated      = activationSuccess;
             const activatedAt       = activationSuccess ? mergedAt   : null;
-
             // Final UPDATE
             // WHERE clause switches based on which lookup succeeded.
             // KPI COALESCE: valid integer from file wins; null preserves DB value.
@@ -599,12 +580,10 @@ jobs:
             //   $10 lookup value — prNumber (int) OR assetName (text)
             //   $11 manual_time_minutes_per_run from kpi-snapshot.json (int or null)
             //   $12 estimated_runs_per_week from kpi-snapshot.json (int or null)
-
             const whereClause = lookupByPrNumber
               ? `WHERE github_pr_number = $10`
               : `WHERE asset_name = $10`;
             const lookupValue = lookupByPrNumber ? prNumber : assetName;
-
             const updateResult = await pgClient.query(
               `
               UPDATE coe_asset_registry SET
@@ -640,14 +619,11 @@ jobs:
                 kpiRunsPerWeek,
               ]
             );
-
             await pgClient.end();
-
             if (updateResult.rowCount === 0) {
               console.error(`❌ Final UPDATE matched zero rows — this should not happen after a successful lookup.`);
               process.exit(1);
             }
-
             const {
               asset_name,
               id,
@@ -655,7 +631,6 @@ jobs:
               manual_time_minutes_per_run,
               estimated_runs_per_week,
             } = updateResult.rows[0];
-
             console.log(`\n✅ [PR #${prNumber}] "${asset_name}" -> approved`);
             console.log(`   Registry ID:                 ${id}`);
             console.log(`   Lookup used:                 ${lookupByPrNumber ? 'PR number (primary)' : 'asset_name (fallback)'}`);
