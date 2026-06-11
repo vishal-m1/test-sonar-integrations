@@ -1,0 +1,7 @@
+{
+  "asset_name": "news-summarise-google-news-email-telegram",
+  "manual_time_minutes_per_run": 45,
+  "estimated_runs_per_week": 3,
+  "snapshot_generated_at": "2026-06-11T14:30:00Z",
+  "snapshot_generated_by": "gaurav.shakya@fulcrumapp.com"
+}
