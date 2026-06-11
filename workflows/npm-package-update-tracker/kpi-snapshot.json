@@ -1,7 +1,7 @@
 {
   "asset_name": "npm-package-update-tracker",
-  "manual_time_minutes_per_run": 12,
-  "estimated_runs_per_week": 9,
+  "manual_time_minutes_per_run": 20,
+  "estimated_runs_per_week": 17,
   "snapshot_generated_at": "2026-06-08T11:33:00Z",
   "snapshot_generated_by": "user@fulcrumapp.com"
 }

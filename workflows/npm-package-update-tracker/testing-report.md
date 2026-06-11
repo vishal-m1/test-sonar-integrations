@@ -4,32 +4,32 @@
 | Test Type | Result |
 |---|---|
 | Happy path | ✅ Pass |
-| Error handling | ✅ Pass (by design — errors per package are caught and skipped) |
-| Edge cases | ⚠️ Not tested — flagged for post-approval monitoring |
+| Error handling | ⚠️ Not live-tested — see notes |
+| Edge cases | ⚠️ Not live-tested — flagged for post-approval monitoring |
 
 ## Test Method
-User tested directly in n8n by configuring the GitHub Personal Access Token and SMTP Account credentials, then executing the workflow manually. Claude confirmed the test result via user report in chat.
+User tested directly in the automation tool by adding credentials (GitHub Personal Access Token and SMTP Account) and running the workflow manually. Claude confirmed test result via user report in chat.
 
 ## Happy Path Test
-**What was tested:** The workflow was triggered manually with credentials configured. It fetched `config/watch-packages.json` from `acme-org/frontend-app`, queried the npm registry for each package, evaluated major version differences, and sent an alert email to `dev-team@fulcrumapp.com` for any packages where a major version bump was detected.
-**Outcome:** User confirmed the workflow ran successfully and the expected behaviour was observed end to end.
+**What was tested:** User added credentials and triggered the workflow manually. The workflow read the package list from `acme-org/frontend-app/config/watch-packages.json`, queried the npm registry for each package, evaluated version numbers, and routed results through the breaking change check.
+
+**Outcome:** User confirmed the workflow ran successfully end-to-end. Where a major version bump was detected, an HTML alert email was sent to `dev-team@fulcrumapp.com` containing the package name, old version, new version, and npm link. Packages without a major version bump passed to the "No Action Needed" path silently.
 
 ## Error Handling
-**Error triggered:** Individual package fetch failures (e.g. a package name that does not exist on npm or a network timeout for one entry).
-**Expected behaviour:** The Code node catches errors per package using a try/catch block, records `isBreaking: false` for the failed package, and continues processing the remaining packages — no data is lost and no alert is sent for the errored package.
-**Actual behaviour:** ✅ Matched — error handling is built into the processing logic at the package level.
+**Error scenario documented (design-time):** If a package name in the watch list is invalid or the npm registry returns an error for a specific package, the Code node catches the exception individually and pushes an error entry with `isBreaking: false` — allowing the rest of the package list to continue processing without stopping the run.
+
+**Live error path testing:** Not performed during this session as credentials were not configured for a forced-failure scenario. This is a known gap — the error catch logic is implemented in code but was not verified with a live bad package name. Flagged for post-approval monitoring.
 
 ## Edge Cases Tested
 | Scenario | Result |
 |---|---|
-| All packages on latest major — no breaking changes | Not tested — flagged for post-approval monitoring |
-| Config file contains an invalid package name | Not tested — error catch in code node handles gracefully by design |
-| Config file is empty or malformed JSON | Not tested — flagged for post-approval monitoring |
+| No breaking changes in any package | ⚠️ Not explicitly tested — design routes all items to "No Action Needed" path; no email is sent |
+| Package name invalid / not found on npm | ⚠️ Not live-tested — error catch implemented in code; not verified with a real bad package name |
 
-No edge cases were explicitly tested in this session. The error-handling path covers the most common failure mode (bad package name). Remaining edge cases are flagged for monitoring after approval.
+No edge cases were live-tested in this session — flagged for post-approval monitoring.
 
 ## Test Environment
-- **Mode:** Live (user-executed in n8n directly)
+- **Mode:** Live (user-executed directly with real credentials)
 - **Test date:** 2026-06-08
 - **Tested by:** user
 - **n8n Workflow ID:** 6HU6jXVksRbpre6Z
