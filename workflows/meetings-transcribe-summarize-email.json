@@ -1,0 +1,95 @@
+{
+  "id": "9uK3uoOKuswHL3e1",
+  "name": "Meetings - Transcribe, Summarize & Email Action Items",
+  "active": false,
+  "isArchived": false,
+  "versionId": "76d6cf1a-f74c-47b2-9971-284996b5abd0",
+  "description": "Receives a meeting recording URL via webhook, transcribes it with OpenAI Whisper, generates a structured summary and action items with Claude, then emails the results to all attendees via Gmail.",
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true,
+    "binaryMode": "separate"
+  },
+  "connections": {
+    "Receive Meeting Recording": {
+      "main": [[{"node": "Download Recording", "type": "main", "index": 0}]]
+    },
+    "Download Recording": {
+      "main": [[{"node": "Transcribe with Whisper", "type": "main", "index": 0}]]
+    },
+    "Transcribe with Whisper": {
+      "main": [[{"node": "Generate Summary & Action Items", "type": "main", "index": 0}]]
+    },
+    "Generate Summary & Action Items": {
+      "main": [[{"node": "Parse AI Response", "type": "main", "index": 0}]]
+    },
+    "Parse AI Response": {
+      "main": [[{"node": "Email Action Items to Attendees", "type": "main", "index": 0}]]
+    }
+  },
+  "nodes": [
+    {
+      "parameters": {"httpMethod": "POST", "path": "meeting-recording", "options": {}},
+      "id": "ff88020a-0218-483e-80ff-8a1f42815317",
+      "name": "Receive Meeting Recording",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [0, 0],
+      "webhookId": "2b20dd55-f27d-4c09-ba21-d49b2a84f0bd"
+    },
+    {
+      "parameters": {"url": "={{ $json.body.recordingUrl }}", "options": {}},
+      "id": "75b0c620-d414-4c7f-a1ac-a6e2153cc314",
+      "name": "Download Recording",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [224, 0]
+    },
+    {
+      "parameters": {"resource": "audio", "operation": "transcribe", "options": {"language": "en"}},
+      "id": "a0a220ef-e293-418f-ad83-333df5440a8e",
+      "name": "Transcribe with Whisper",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 2.3,
+      "position": [448, 0]
+    },
+    {
+      "parameters": {
+        "modelId": {"__rl": true, "mode": "list", "value": "claude-opus-4-5"},
+        "messages": {"values": [{"content": "=Analyze the following meeting transcript and provide:\n\n1. A concise meeting summary (3-5 bullet points)\n2. A list of action items with assignees (if mentioned) and due dates (if mentioned)\n3. Key decisions made during the meeting\n\nFormat your response as JSON with this exact structure:\n{\n  \"summary\": [\"bullet 1\", \"bullet 2\", \"bullet 3\"],\n  \"actionItems\": [\n    {\"task\": \"task description\", \"assignee\": \"name or 'Unassigned'\", \"dueDate\": \"date or 'TBD'\"}\n  ],\n  \"keyDecisions\": [\"decision 1\", \"decision 2\"]\n}\n\nMeeting Transcript:\n{{ $json.text }}"}]},
+        "options": {"system": "You are an expert meeting facilitator. Extract structured information from meeting transcripts. Always respond with valid JSON only, no additional text.", "maxTokens": 2048}
+      },
+      "id": "0fa9b9b5-b64a-48bf-8f78-eaed559f74e6",
+      "name": "Generate Summary & Action Items",
+      "type": "@n8n/n8n-nodes-langchain.anthropic",
+      "typeVersion": 1,
+      "position": [672, 0]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const transcript = $('Transcribe with Whisper').item.json.text || '';\nconst webhookData = $('Receive Meeting Recording').item.json.body;\nconst attendees = webhookData.attendees || [];\nconst meetingTitle = webhookData.meetingTitle || 'Meeting';\nconst meetingDate = webhookData.meetingDate || new Date().toISOString().split('T')[0];\nlet aiResponse;\ntry {\n  const rawText = $input.item.json.content?.[0]?.text || $input.item.json.text || $input.item.json.output || '';\n  aiResponse = JSON.parse(rawText);\n} catch (e) {\n  aiResponse = { summary: ['Meeting summary could not be parsed.'], actionItems: [], keyDecisions: [] };\n}\nconst summaryBullets = (aiResponse.summary || []).map(b => '\u2022 ' + b).join('\n');\nconst actionItemsList = (aiResponse.actionItems || []).map(a => '\u2022 ' + a.task + ' \u2014 Assignee: ' + a.assignee + ' | Due: ' + a.dueDate).join('\n');\nconst decisionsList = (aiResponse.keyDecisions || []).map(d => '\u2022 ' + d).join('\n');\nconst emailBody = '<h2>Meeting Summary: ' + meetingTitle + '</h2><p><strong>Date:</strong> ' + meetingDate + '</p><p><strong>Attendees:</strong> ' + attendees.join(', ') + '</p><h3>Summary</h3><p>' + summaryBullets.replace(/\n/g, '<br>') + '</p><h3>Action Items</h3><p>' + (actionItemsList ? actionItemsList.replace(/\n/g, '<br>') : 'No action items identified.') + '</p><h3>Key Decisions</h3><p>' + (decisionsList ? decisionsList.replace(/\n/g, '<br>') : 'No key decisions recorded.') + '</p><hr><p style=\"color:#888;font-size:12px;\">This summary was automatically generated from the meeting recording.</p>';\nreturn { meetingTitle, meetingDate, attendees, attendeeList: attendees.join(', '), emailBody, summary: aiResponse.summary || [], actionItems: aiResponse.actionItems || [], keyDecisions: aiResponse.keyDecisions || [] };"
+      },
+      "id": "a3f17f15-81e1-4960-860b-177c44f2a444",
+      "name": "Parse AI Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [896, 0]
+    },
+    {
+      "parameters": {
+        "sendTo": "={{ $json.attendeeList }}",
+        "subject": "={{ $json.meetingTitle }} — Action Items & Summary ({{ $json.meetingDate }})",
+        "message": "={{ $json.emailBody }}",
+        "options": {"appendAttribution": false, "senderName": "Meeting Bot"}
+      },
+      "id": "6ca088db-19f1-4a6b-94c4-fa42307cb598",
+      "name": "Email Action Items to Attendees",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [1120, 0]
+    }
+  ],
+  "tags": [],
+  "meta": {"aiBuilderAssisted": true, "builderVariant": "mcp"}
+}
