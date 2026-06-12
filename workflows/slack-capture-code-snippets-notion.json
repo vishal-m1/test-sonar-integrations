@@ -1,0 +1,82 @@
+{
+  "id": "tUugOMjh5ft1vGjx",
+  "name": "Slack - Capture Code Snippets - Notion",
+  "active": false,
+  "description": "Listens for Slack app mentions, extracts code blocks from messages, and appends them with context to an engineering notes page in Notion.",
+  "nodes": [
+    {
+      "parameters": { "trigger": ["app_mention"], "watchWorkspace": true, "options": {} },
+      "id": "d929ac8e-52e3-4ed3-8c67-d0de0b0b0d4e",
+      "name": "Slack - App Mention Trigger",
+      "type": "n8n-nodes-base.slackTrigger",
+      "typeVersion": 1,
+      "position": [0, 96]
+    },
+    {
+      "parameters": {
+        "jsCode": "\nconst text = $input.first().json.event?.text || '';\nconst codeBlockRegex = /```(?:[a-zA-Z0-9+#.-]*)\\n?([\\s\\S]*?)```/g;\nconst snippets = [];\nlet match;\nwhile ((match = codeBlockRegex.exec(text)) !== null) {\n  snippets.push({\n    code: match[1].trim(),\n    fullMessage: text,\n    slackUser: $input.first().json.event?.user || 'unknown',\n    channel: $input.first().json.event?.channel || 'unknown',\n    timestamp: $input.first().json.event?.ts || new Date().toISOString()\n  });\n}\nreturn snippets.map(s => ({ json: s }));\n"
+      },
+      "id": "88397045-8158-43c9-a8b2-32d10fb502af",
+      "name": "Extract Code Snippets",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [224, 96]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose", "version": 1 },
+          "conditions": [{ "leftValue": "={{ $json.code }}", "operator": { "type": "string", "operation": "notEmpty" } }],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "02efa929-a82f-4fac-a8bc-f200ba7183fe",
+      "name": "Check: Snippets Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [448, 96]
+    },
+    {
+      "parameters": { "operation": "search", "text": "Engineering Notes", "limit": 1, "options": { "filter": { "filters": { "value": "page" } } } },
+      "id": "c62a763b-4df1-4d0c-a8a1-e4ac60b47583",
+      "name": "Find Engineering Notes Page",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [672, 0],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "resource": "block",
+        "blockId": { "__rl": true, "mode": "id", "value": "={{ $(\"Find Engineering Notes Page\").first().json.id }}" },
+        "blockUi": {
+          "blockValues": [
+            { "type": "heading_3", "textContent": "={{ \"Code Snippet — \" + new Date($json.timestamp * 1000).toLocaleString() + \" (from Slack)\" }}" },
+            { "textContent": "={{ \"Context: \" + $json.fullMessage.replace(/```[\\s\\S]*?```/g, \"[code]\").trim() }}" },
+            { "richText": true, "text": { "text": [{ "text": "={{ $json.code }}", "annotationUi": { "code": true } }] } }
+          ]
+        }
+      },
+      "id": "8418178d-7138-4227-8e6c-1f603e1b6ad7",
+      "name": "Save Snippet to Notion",
+      "type": "n8n-nodes-base.notion",
+      "typeVersion": 2.2,
+      "position": [896, 0]
+    },
+    {
+      "parameters": {},
+      "id": "aed06b19-c761-425b-8b60-ffce2707f508",
+      "name": "No Code Snippets - Skip",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [672, 192]
+    }
+  ],
+  "connections": {
+    "Slack - App Mention Trigger": { "main": [[{ "node": "Extract Code Snippets", "type": "main", "index": 0 }]] },
+    "Extract Code Snippets": { "main": [[{ "node": "Check: Snippets Found?", "type": "main", "index": 0 }]] },
+    "Check: Snippets Found?": { "main": [[{ "node": "Find Engineering Notes Page", "type": "main", "index": 0 }], [{ "node": "No Code Snippets - Skip", "type": "main", "index": 0 }]] },
+    "Find Engineering Notes Page": { "main": [[{ "node": "Save Snippet to Notion", "type": "main", "index": 0 }]] }
+  }
+}
