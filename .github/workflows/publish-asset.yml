@@ -1,0 +1,61 @@
+name: Sample CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Print Hello World
+        run: echo "Hello, GitHub Actions!"
+
+      - name: Show system information
+        run: |
+          echo "Current directory:"
+          pwd
+          echo ""
+          echo "Files:"
+          ls -la
+          echo ""
+          echo "OS Information:"
+          uname -a
+
+      - name: Verify workflow
+        run: echo "Workflow completed successfully!"
+
+  project_check:
+    name: Project Check
+    runs-on: ubuntu-latest
+    outputs:
+      is_decommission: ${{ steps.check.outputs.is_decommission }}
+
+    steps:
+      - name: Set decommission flag
+        id: check
+        run: echo "is_decommission=true" >> "$GITHUB_OUTPUT"
+
+  decommission:
+    name: Decommission
+    runs-on: ubuntu-latest
+    needs: project_check
+    if: github.ref == 'refs/heads/main' && needs.project_check.outputs.is_decommission == 'true'
+    permissions:
+      contents: read
+      id-token: write
+      actions: write
+
+    steps:
+      - name: Run decommission test
+        run: |
+          echo "Decommission job started."
+          echo "This is a sample decommission job."
+          echo "Job completed successfully!"
