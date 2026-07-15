@@ -31,3 +31,31 @@ jobs:
 
       - name: Verify workflow
         run: echo "Workflow completed successfully!"
+
+  project_check:
+    name: Project Check
+    runs-on: ubuntu-latest
+    outputs:
+      is_decommission: ${{ steps.check.outputs.is_decommission }}
+
+    steps:
+      - name: Set decommission flag
+        id: check
+        run: echo "is_decommission=true" >> "$GITHUB_OUTPUT"
+
+  decommission:
+    name: Decommission
+    runs-on: ubuntu-latest
+    needs: project_check
+    if: github.ref == 'refs/heads/main' && needs.project_check.outputs.is_decommission == 'true'
+    permissions:
+      contents: read
+      id-token: write
+      actions: write
+
+    steps:
+      - name: Run decommission test
+        run: |
+          echo "Decommission job started."
+          echo "This is a sample decommission job."
+          echo "Job completed successfully!"
