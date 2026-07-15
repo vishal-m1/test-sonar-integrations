@@ -1,0 +1,33 @@
+name: Sample CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Print Hello World
+        run: echo "Hello, GitHub Actions!"
+
+      - name: Show system information
+        run: |
+          echo "Current directory:"
+          pwd
+          echo ""
+          echo "Files:"
+          ls -la
+          echo ""
+          echo "OS Information:"
+          uname -a
+
+      - name: Verify workflow
+        run: echo "Workflow completed successfully!"
