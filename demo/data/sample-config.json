@@ -1,0 +1,26 @@
+{
+  "app": {
+    "name": "test-sonar-integrations",
+    "version": "1.2.0",
+    "environment": "staging"
+  },
+  "server": {
+    "port": 3000,
+    "host": "0.0.0.0",
+    "timeout": 30000
+  },
+  "database": {
+    "pool": {
+      "min": 2,
+      "max": 10
+    },
+    "ssl": true
+  },
+  "features": {
+    "sonarIntegration": true,
+    "webhooksEnabled": true,
+    "debugMode": false
+  },
+  "createdBy": "Claude demo PR",
+  "createdAt": "2026-05-21"
+}
