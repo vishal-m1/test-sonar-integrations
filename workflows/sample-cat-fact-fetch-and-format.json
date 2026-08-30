@@ -1,0 +1,67 @@
+{
+  "id": "gaYrMAfKW8lD51o9",
+  "name": "Sample - Cat Fact - Fetch and Format",
+  "active": false,
+  "isArchived": false,
+  "versionId": "0ea40498-2f65-42a7-859c-5e0500002863",
+  "createdAt": "2026-05-26T13:19:41.467Z",
+  "updatedAt": "2026-05-26T13:19:41.467Z",
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true
+  },
+  "connections": {
+    "Manual Trigger": {
+      "main": [[{"node": "Fetch Cat Fact", "type": "main", "index": 0}]]
+    },
+    "Fetch Cat Fact": {
+      "main": [[{"node": "Format Output", "type": "main", "index": 0}]]
+    }
+  },
+  "nodes": [
+    {
+      "id": "6b2776c9-149f-444f-8d17-89e29565dffa",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 0]
+    },
+    {
+      "id": "3e19e185-9dd2-4bce-8272-b71cc45de26b",
+      "name": "Fetch Cat Fact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [224, 0],
+      "parameters": {
+        "method": "GET",
+        "url": "https://catfact.ninja/fact"
+      }
+    },
+    {
+      "id": "7e2e9f76-4625-4dca-a794-ecf99446526e",
+      "name": "Format Output",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [448, 0],
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": false,
+        "fields": {
+          "values": [
+            {"name": "fact",         "type": "string",  "stringValue":  "={{ $json.fact }}"},
+            {"name": "char_count",   "type": "number",  "numberValue":  "={{ $json.length }}"},
+            {"name": "fetched_at",   "type": "string",  "stringValue":  "={{ new Date().toISOString() }}"},
+            {"name": "source",       "type": "string",  "stringValue":  "catfact.ninja"},
+            {"name": "is_long_fact", "type": "boolean", "booleanValue": "={{ $json.length > 80 }}"}
+          ]
+        }
+      }
+    }
+  ],
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "description": "Manually triggered workflow that fetches a random cat fact from catfact.ninja and formats it into structured output fields. No credentials required. Sample/demo workflow.",
+  "instance": "vishalmishra.app.n8n.cloud"
+}
