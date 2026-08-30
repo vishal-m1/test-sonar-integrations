@@ -1,0 +1,77 @@
+{
+  "id": "wkYwBad2CYSzXrxY",
+  "name": "Chat - Trigger Message - Slack",
+  "active": false,
+  "nodes": [
+    {
+      "id": "chat-event-trigger",
+      "name": "Chat Event Trigger",
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.4,
+      "position": [240, 300],
+      "parameters": {
+        "public": false,
+        "options": {
+          "responseMode": "lastNode",
+          "title": "Demo Chat",
+          "subtitle": "Send a message to trigger a Slack notification!",
+          "inputPlaceholder": "Type your message here..."
+        }
+      }
+    },
+    {
+      "id": "format-message",
+      "name": "Format Message",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [540, 300],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "msg-field",
+              "name": "slackMessage",
+              "value": "=\ud83e\udd16 *New Chat Event* \n\n*Message:* {{ $json.chatInput }}\n*Received at:* {{ $now.toISO() }}",
+              "type": "string"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "send-slack-notification",
+      "name": "Send Slack Notification",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.4,
+      "position": [840, 300],
+      "parameters": {
+        "resource": "message",
+        "operation": "post",
+        "select": "channel",
+        "channelId": { "__rl": true, "mode": "name", "value": "general" },
+        "messageType": "text",
+        "text": "={{ $json.slackMessage }}",
+        "otherOptions": {
+          "mrkdwn": true,
+          "includeLinkToWorkflow": true
+        }
+      },
+      "credentials": {
+        "slackOAuth2Api": { "id": "", "name": "Slack OAuth2" }
+      }
+    }
+  ],
+  "connections": {
+    "Chat Event Trigger": {
+      "main": [[{ "node": "Format Message", "type": "main", "index": 0 }]]
+    },
+    "Format Message": {
+      "main": [[{ "node": "Send Slack Notification", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {},
+  "meta": {
+    "instanceId": "vishalmishra.app.n8n.cloud"
+  }
+}
