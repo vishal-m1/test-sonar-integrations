@@ -1,0 +1,81 @@
+{
+  "id": "4pHPEDuuN4f8dUMR",
+  "name": "Sample - Fetch Public Posts - JSONPlaceholder",
+  "active": false,
+  "isArchived": false,
+  "versionId": "452948cc-1cb5-4662-a9ed-fbdcfbdc663c",
+  "description": "Sample workflow: manually triggered, fetches posts from JSONPlaceholder public API, limits to top 3, and formats output with id, title, preview, and timestamp.",
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true
+  },
+  "connections": {
+    "Start": {
+      "main": [[{"node": "Fetch Posts", "type": "main", "index": 0}]]
+    },
+    "Fetch Posts": {
+      "main": [[{"node": "Top 3 Posts", "type": "main", "index": 0}]]
+    },
+    "Top 3 Posts": {
+      "main": [[{"node": "Format Output", "type": "main", "index": 0}]]
+    }
+  },
+  "nodes": [
+    {
+      "id": "a7768fb7-ac95-412c-ae4a-cf2bbb439a04",
+      "name": "Start",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 0]
+    },
+    {
+      "id": "011c3d92-33da-4821-837b-a8a7125ce80f",
+      "name": "Fetch Posts",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [224, 0],
+      "parameters": {
+        "method": "GET",
+        "url": "https://jsonplaceholder.typicode.com/posts",
+        "options": {}
+      }
+    },
+    {
+      "id": "a4873e0a-e5b6-4ec0-a092-5b77fee2a8c9",
+      "name": "Top 3 Posts",
+      "type": "n8n-nodes-base.limit",
+      "typeVersion": 1,
+      "position": [448, 0],
+      "parameters": {
+        "maxItems": 3,
+        "keep": "firstItems"
+      }
+    },
+    {
+      "id": "df7731b7-dc53-4e81-bb53-fa61055cbf44",
+      "name": "Format Output",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [672, 0],
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": false,
+        "fields": {
+          "values": [
+            {"name": "post_id", "type": "number", "numberValue": "={{ $json.id }}"},
+            {"name": "title", "type": "string", "stringValue": "={{ $json.title }}"},
+            {"name": "preview", "type": "string", "stringValue": "={{ $json.body.substring(0, 60) }}..."},
+            {"name": "fetched_at", "type": "string", "stringValue": "={{ $now.toISO() }}"}
+          ]
+        }
+      }
+    }
+  ],
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "instance": "vishalmishra.app.n8n.cloud",
+  "createdAt": "2026-05-21T12:22:04.604Z",
+  "updatedAt": "2026-05-21T12:22:04.604Z"
+}
