@@ -1,0 +1,68 @@
+{
+  "id": "cXBOQCYvOSK0b77n",
+  "name": "Sample - Fetch Daily Joke - Format Output",
+  "active": false,
+  "isArchived": false,
+  "versionId": "66b77de3-9fc4-4d20-ac39-a418e50d369e",
+  "createdAt": "2026-05-21T14:25:35.300Z",
+  "updatedAt": "2026-05-21T14:25:35.300Z",
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true
+  },
+  "connections": {
+    "Manual Trigger": {
+      "main": [[{"node": "Fetch Random Joke", "type": "main", "index": 0}]]
+    },
+    "Fetch Random Joke": {
+      "main": [[{"node": "Format Output", "type": "main", "index": 0}]]
+    }
+  },
+  "nodes": [
+    {
+      "id": "d303d5cc-cb4d-4db6-bfae-24d2e964803b",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 0]
+    },
+    {
+      "id": "7cea0c78-a3af-49bd-a6b9-2ff50fbcd93f",
+      "name": "Fetch Random Joke",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.3,
+      "position": [224, 0],
+      "parameters": {
+        "method": "GET",
+        "url": "https://official-joke-api.appspot.com/random_joke"
+      }
+    },
+    {
+      "id": "75e4004d-207d-4bd3-88b5-53453e4cb912",
+      "name": "Format Output",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [448, 0],
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": false,
+        "fields": {
+          "values": [
+            {"name": "joke_id", "type": "number", "numberValue": "={{ $json.id }}"},
+            {"name": "category", "type": "string", "stringValue": "={{ $json.type }}"},
+            {"name": "setup", "type": "string", "stringValue": "={{ $json.setup }}"},
+            {"name": "punchline", "type": "string", "stringValue": "={{ $json.punchline }}"},
+            {"name": "fetched_at", "type": "string", "stringValue": "={{ new Date().toISOString() }}"},
+            {"name": "summary", "type": "string", "stringValue": "={{ $json.setup + \" ... \" + $json.punchline }}"}
+          ]
+        }
+      }
+    }
+  ],
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "description": "Manually triggered workflow that fetches a random joke from a public API and formats the output fields. No credentials required. Used as a sample/demo workflow.",
+  "instance": "vishalmishra.app.n8n.cloud"
+}
