@@ -1,0 +1,87 @@
+{
+  "id": "0h5dHyEGc4U4B5jR",
+  "name": "Notifications - Slack Messages - Gmail",
+  "active": false,
+  "isArchived": false,
+  "versionId": "23899960-b025-449d-841f-a07f6f63c8aa",
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": true
+  },
+  "connections": {
+    "Slack Message Trigger": {
+      "main": [[{"node": "Format Email Content", "type": "main", "index": 0}]]
+    },
+    "Format Email Content": {
+      "main": [[{"node": "Send Email via Gmail", "type": "main", "index": 0}]]
+    }
+  },
+  "nodes": [
+    {
+      "id": "51f1f743-6e0c-4488-b731-c1cc04f7567f",
+      "name": "Slack Message Trigger",
+      "type": "n8n-nodes-base.slackTrigger",
+      "typeVersion": 1,
+      "position": [0, 0],
+      "parameters": {
+        "trigger": ["message"],
+        "watchWorkspace": true
+      },
+      "webhookId": "3f25d1c2-4c8b-4a93-ba3a-e06f12e10f10"
+    },
+    {
+      "id": "4e17ee84-c3b3-4a6a-adfe-9eb444bf7482",
+      "name": "Format Email Content",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [224, 0],
+      "parameters": {
+        "mode": "manual",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "subject-1",
+              "name": "emailSubject",
+              "value": "={{ \"New Slack Message from \" + $json.event.user + \" in #\" + $json.event.channel }}",
+              "type": "string"
+            },
+            {
+              "id": "body-2",
+              "name": "emailBody",
+              "value": "={{ \"<h2>New Slack Message</h2><p><strong>From (User ID):</strong> \" + $json.event.user + \"</p><p><strong>Channel:</strong> \" + $json.event.channel + \"</p><p><strong>Message:</strong><br/>\" + $json.event.text + \"</p>\" }}",
+              "type": "string"
+            }
+          ]
+        },
+        "includeOtherFields": true,
+        "include": "all"
+      }
+    },
+    {
+      "id": "ba5a3e03-853e-4505-8472-e83161a23294",
+      "name": "Send Email via Gmail",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [448, 0],
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "team@devsavant.com",
+        "subject": "={{ $json.emailSubject }}",
+        "emailType": "html",
+        "message": "={{ $json.emailBody }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "webhookId": "5f88445f-b8c0-463a-b996-0fb8c543a8fc"
+    }
+  ],
+  "meta": {
+    "aiBuilderAssisted": true,
+    "builderVariant": "mcp"
+  },
+  "description": "Listens for new Slack messages across the workspace and automatically forwards them to a team email via Gmail, including sender, channel, and message content.",
+  "createdAt": "2026-05-22T12:23:17.573Z",
+  "updatedAt": "2026-05-22T12:23:17.573Z"
+}
